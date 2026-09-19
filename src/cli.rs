@@ -1,0 +1,252 @@
+use std::{ffi::OsString, fmt, path::PathBuf};
+
+pub const HELP: &str = "alb — Audio Library Builder
+
+Usage: alb [OPTIONS]
+       alb build --input SOURCE --output DESTINATION [--dry-run] [--resume]
+       alb scan --input SOURCE [--verbose] [--hash]
+
+Commands:
+  build           Build a verified output library (Linux)
+  scan            Inspect source files without creating an output library
+
+Options:
+  -h, --help       Print help
+  -V, --version    Print version
+
+Build execution requires Linux; use --dry-run to preview without writes.
+Use 'alb build --help' or 'alb scan --help' for command options.
+Source libraries must always remain immutable.";
+
+pub const BUILD_HELP: &str = "Usage: alb build --input SOURCE --output DESTINATION [--dry-run] [--resume]
+
+Options:
+  --input SOURCE         Required source library path
+  --output DESTINATION   Required output library path
+  --resume               Verify and reuse matching outputs; retain old partials
+  --dry-run              Hash files and summarize planned work; never write files
+  -h, --help             Print help
+
+Use separate option values. Prefix paths beginning with '-' with './'.
+Root paths are checked for equal or nested directories, including symlink aliases.
+Input must exist; output may be absent. Dry-run creates no directories.
+Discovery counts regular files and skips all symlinks.
+Files are grouped by extension: FLAC, M4A, MP3, OGG, WAV, UNKNOWN.
+Basic metadata is read for all five supported types without changing files.
+Build copies through verified partial files and never overwrites destinations.
+Copies preserve source modification time; original creation time is archived in _ALB reports.
+Linux cannot restore original creation time as destination filesystem birth time.
+Free space is checked before copying, with a safety allowance.
+File problems go to Problem Files/<Problem Type> with a text explanation.
+Unreadable files are reported; other files continue. Root/output safety failures are fatal.
+Terminal progress uses one status line; redirected stderr has stage summaries.
+Execution requires Linux with openat2 support. Failed partials are retained. Resume rechecks current sources and output bytes.";
+
+pub const SCAN_HELP: &str = "Usage: alb scan --input SOURCE [--verbose] [--hash]
+
+Options:
+  --input SOURCE  Required source library directory
+  --verbose       Print per-file types, metadata, and errors
+  --hash          Hash all catalog files and report exact duplicate groups
+  -h, --help      Print help
+
+Scan is read-only. All symlinks below the input root are skipped.
+Classification uses extensions only. Basic tags populate the generic catalog.
+Exit status: 0 completed, 1 scan/inspection failure, 2 usage error.";
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ScanArgs {
+    pub input: PathBuf,
+    pub verbose: bool,
+    pub hash: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct BuildArgs {
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub dry_run: bool,
+    pub resume: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Command {
+    Help,
+    Version,
+    BuildHelp,
+    ScanHelp,
+    Scan(ScanArgs),
+    Build(BuildArgs),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CliError {
+    UnsupportedArguments,
+    MissingOption(&'static str),
+    MissingValue(&'static str),
+    DuplicateOption(&'static str),
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedArguments => write!(f, "unsupported arguments"),
+            Self::MissingOption(option) => write!(f, "required option {option} is missing"),
+            Self::MissingValue(option) => write!(f, "{option} requires a non-empty path value"),
+            Self::DuplicateOption(option) => write!(f, "{option} was supplied more than once"),
+        }
+    }
+}
+
+impl std::error::Error for CliError {}
+
+pub fn parse(args: Vec<OsString>) -> Result<Command, CliError> {
+    match args.as_slice() {
+        [] => Ok(Command::Help),
+        [arg] if arg == "--help" || arg == "-h" => Ok(Command::Help),
+        [arg] if arg == "--version" || arg == "-V" => Ok(Command::Version),
+        [command, rest @ ..] if command == "build" => parse_build(rest),
+        [command, rest @ ..] if command == "scan" => parse_scan(rest),
+        _ => Err(CliError::UnsupportedArguments),
+    }
+}
+
+fn parse_build(args: &[OsString]) -> Result<Command, CliError> {
+    if matches!(args, [arg] if arg == "--help" || arg == "-h") {
+        return Ok(Command::BuildHelp);
+    }
+
+    let mut input = None;
+    let mut output = None;
+    let mut dry_run = false;
+    let mut resume = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--resume" {
+            if resume {
+                return Err(CliError::DuplicateOption("--resume"));
+            }
+            resume = true;
+            continue;
+        }
+        if arg == "--dry-run" {
+            if dry_run {
+                return Err(CliError::DuplicateOption("--dry-run"));
+            }
+            dry_run = true;
+            continue;
+        }
+        let (name, slot) = if arg == "--input" {
+            ("--input", &mut input)
+        } else if arg == "--output" {
+            ("--output", &mut output)
+        } else {
+            return Err(CliError::UnsupportedArguments);
+        };
+        if slot.is_some() {
+            return Err(CliError::DuplicateOption(name));
+        }
+        let value = args.next().ok_or(CliError::MissingValue(name))?;
+        // Reject option-looking values without converting the path to Unicode.
+        if value.is_empty() || value.as_encoded_bytes().starts_with(b"-") {
+            return Err(CliError::MissingValue(name));
+        }
+        *slot = Some(PathBuf::from(value));
+    }
+
+    Ok(Command::Build(BuildArgs {
+        input: input.ok_or(CliError::MissingOption("--input"))?,
+        output: output.ok_or(CliError::MissingOption("--output"))?,
+        dry_run,
+        resume,
+    }))
+}
+
+fn parse_scan(args: &[OsString]) -> Result<Command, CliError> {
+    if matches!(args, [arg] if arg == "--help" || arg == "-h") {
+        return Ok(Command::ScanHelp);
+    }
+    let mut input = None;
+    let mut verbose = false;
+    let mut hash = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--hash" {
+            if hash {
+                return Err(CliError::DuplicateOption("--hash"));
+            }
+            hash = true;
+        } else if arg == "--verbose" {
+            if verbose {
+                return Err(CliError::DuplicateOption("--verbose"));
+            }
+            verbose = true;
+        } else if arg == "--input" {
+            if input.is_some() {
+                return Err(CliError::DuplicateOption("--input"));
+            }
+            let value = args.next().ok_or(CliError::MissingValue("--input"))?;
+            if value.is_empty() || value.as_encoded_bytes().starts_with(b"-") {
+                return Err(CliError::MissingValue("--input"));
+            }
+            input = Some(PathBuf::from(value));
+        } else {
+            return Err(CliError::UnsupportedArguments);
+        }
+    }
+    Ok(Command::Scan(ScanArgs {
+        input: input.ok_or(CliError::MissingOption("--input"))?,
+        verbose,
+        hash,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_paths_in_either_option_order() {
+        for args in [
+            ["--input", "music collection", "--output", "../clean"],
+            ["--output", "../clean", "--input", "music collection"],
+        ] {
+            let args = std::iter::once("build")
+                .chain(args)
+                .map(OsString::from)
+                .collect();
+            assert_eq!(
+                parse(args),
+                Ok(Command::Build(BuildArgs {
+                    input: PathBuf::from("music collection"),
+                    output: PathBuf::from("../clean"),
+                    dry_run: false,
+                    resume: false,
+                }))
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_non_unicode_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = OsString::from_vec(b"music-\xff".to_vec());
+        let args = vec![
+            "build".into(),
+            "--input".into(),
+            path.clone(),
+            "--output".into(),
+            "clean".into(),
+        ];
+        assert_eq!(
+            parse(args),
+            Ok(Command::Build(BuildArgs {
+                input: PathBuf::from(path),
+                output: PathBuf::from("clean"),
+                dry_run: false,
+                resume: false,
+            }))
+        );
+    }
+}
