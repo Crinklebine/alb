@@ -17,7 +17,7 @@ use unicode_normalization::UnicodeNormalization;
 use windows_sys::Win32::{Foundation::*, Storage::FileSystem::*};
 
 pub struct Directory {
-    pub file: File,
+    file: File,
     path: PathBuf,
     ancestors: Vec<Arc<File>>,
     lock: RefCell<Option<File>>,
@@ -321,7 +321,8 @@ impl Directory {
         Ok(())
     }
     pub fn available_space(&self) -> io::Result<u64> {
-        let path = wide(&self.path)?;
+        // UNC disk-space queries require a trailing directory separator.
+        let path = wide(&self.path.join(""))?;
         let mut available = 0;
         // SAFETY: pinned directory path and valid u64 output; optional outputs null.
         if unsafe {
@@ -391,6 +392,10 @@ mod tests {
             assert!(fs::rename(root.join("folder"), root.join("moved")).is_err());
             assert!(parent.create(OsStr::new("stream:secret")).is_err());
             assert!(parent.read(OsStr::new("../escape")).is_err());
+            let alias = PathBuf::from(root.to_string_lossy().to_uppercase());
+            assert!(Directory::absolute(&alias, true, Some(&directory)).is_err());
+            assert!(Directory::absolute(&alias.join("new-child"), true, Some(&directory)).is_err());
+            assert!(!root.join("new-child").exists());
         }
         fs::remove_dir_all(root).unwrap();
     }

@@ -10,7 +10,7 @@ use std::{
 use unicode_normalization::UnicodeNormalization;
 
 pub struct Directory {
-    pub file: File,
+    file: File,
 }
 fn invalid(text: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, text)

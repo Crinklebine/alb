@@ -26,7 +26,8 @@ jobs:
       - name: Remap build-machine paths
         shell: bash
         run: |
-          echo "RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=/alb --remap-path-prefix=$HOME=/build-home --remap-path-prefix=$RUNNER_TEMP=/build-temp" >> "$GITHUB_ENV"
+          BUILD_HOME="${USERPROFILE:-$HOME}"
+          echo "RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=/alb --remap-path-prefix=$BUILD_HOME=/build-home --remap-path-prefix=$RUNNER_TEMP=/build-temp" >> "$GITHUB_ENV"
       - name: Format
         run: cargo +stable fmt --check
       - name: Test native filesystem behavior

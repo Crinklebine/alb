@@ -57,7 +57,7 @@ impl BuildReport {
         }
         writeln!(
             file,
-            "TIMESTAMP POLICY: source times are readable UTC dates with nanosecond precision. {} Unavailable means the source filesystem did not supply it. Duplicate sources retain individual timestamp records; output mtime comes from the representative.",
+            "TIMESTAMP POLICY: source times are readable UTC dates with nanosecond precision. {} Unavailable means the source filesystem did not supply it. Duplicate sources retain individual timestamp records; output timestamps come from the representative.",
             crate::platform::CREATION_POLICY
         )?;
         for entry in &plan.entries {
