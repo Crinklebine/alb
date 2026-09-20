@@ -161,3 +161,9 @@ executables as workflow artifacts. Build locally for other CPU architectures.
 Synthetic audio fixtures require no encoder during tests.
 
 See PROJECT.md, STATUS.md, DECISIONS.md and NEXT.md for project context.
+
+## License
+
+ALB is licensed under the GNU General Public License, version 3 or (at your
+option) any later version (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for the
+full license text.
