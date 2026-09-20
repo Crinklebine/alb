@@ -153,8 +153,12 @@ mod tests {
     }
     impl Fixture {
         fn new(bytes: &[u8]) -> Self {
+            // Never reuse a directory name while parallel tests may be deleting it.
+            static NEXT_FIXTURE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let root = (0..)
-                .find_map(|n| {
+                .find_map(|_| {
+                    let n = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let p =
                         std::env::temp_dir().join(format!("alb-stage-{}-{n}", std::process::id()));
                     match fs::create_dir(&p) {
