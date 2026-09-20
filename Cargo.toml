@@ -4,6 +4,12 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-or-later"
+description = "Build an organized audio library with metadata sorting, exact deduplication, and verified copies"
+repository = "https://github.com/Crinklebine/alb"
+readme = "README.md"
+keywords = ["audio", "music", "library", "organizer", "cli"]
+categories = ["command-line-utilities", "multimedia::audio"]
+include = ["src/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
 
 [dependencies]
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
