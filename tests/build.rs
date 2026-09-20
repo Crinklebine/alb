@@ -418,6 +418,23 @@ fn archived_times_survive_normal_and_problem_copies() {
         .find(|p| p.extension().unwrap() == "m4a")
         .unwrap();
     assert_eq!(fs::metadata(copied).unwrap().modified().unwrap(), time);
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        assert_eq!(
+            fs::metadata(f.0.join("out/UNKNOWN/archive.txt"))
+                .unwrap()
+                .created()
+                .ok(),
+            birth
+        );
+        assert_eq!(
+            fs::metadata(copied).unwrap().created().ok(),
+            fs::metadata(f.0.join("in/broken.m4a"))
+                .unwrap()
+                .created()
+                .ok()
+        );
+    }
     let report = f.report();
     assert!(report.contains("modified=\"2000-01-01 00:00:00.123456700 UTC\""));
     if let Some(birth) = birth {

@@ -183,3 +183,15 @@ pub fn terminal_progress_supported() -> bool {
         true
     }
 }
+
+pub fn creation_time(metadata: &fs::Metadata) -> Option<SystemTime> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Windows documents zero as "creation time not supported".
+        if metadata.creation_time() == 0 {
+            return None;
+        }
+    }
+    metadata.created().ok()
+}

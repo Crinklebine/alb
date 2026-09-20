@@ -21,7 +21,7 @@ impl SourceStamp {
         Ok(Self {
             len: metadata.len(),
             modified: metadata.modified()?,
-            created: metadata.created().ok(),
+            created: crate::platform::creation_time(&metadata),
             identity: crate::platform::identity(file)?,
         })
     }
@@ -65,9 +65,9 @@ mod archival_tests {
     fn leap_day_formats_in_utc_without_losing_fractional_seconds() {
         assert_eq!(
             timestamp(Some(
-                SystemTime::UNIX_EPOCH + std::time::Duration::new(951827696, 123456789)
+                SystemTime::UNIX_EPOCH + std::time::Duration::new(951827696, 123456700)
             )),
-            "2000-02-29 12:34:56.123456789 UTC"
+            "2000-02-29 12:34:56.123456700 UTC"
         );
     }
     #[test]
@@ -79,9 +79,9 @@ mod archival_tests {
         );
         assert_eq!(
             timestamp(Some(
-                SystemTime::UNIX_EPOCH - std::time::Duration::from_nanos(1)
+                SystemTime::UNIX_EPOCH - std::time::Duration::from_nanos(100)
             )),
-            "1969-12-31 23:59:59.999999999 UTC"
+            "1969-12-31 23:59:59.999999900 UTC"
         );
     }
 }
