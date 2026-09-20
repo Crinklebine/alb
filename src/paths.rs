@@ -77,6 +77,21 @@ pub fn validate(input: &Path, output: &Path) -> Result<ValidatedPaths, PathError
 }
 
 fn resolve_output(output: &Path) -> Result<PathBuf, PathError> {
+    // Windows canonicalization can erase `missing/..` before probing the disk.
+    // Validate the directory preceding each parent traversal on every platform.
+    let mut prefix = PathBuf::new();
+    for component in output.components() {
+        if component == std::path::Component::ParentDir {
+            let directory = if prefix.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                &prefix
+            };
+            require_directory(directory)
+                .map_err(|_| PathError::AmbiguousOutput(output.to_path_buf()))?;
+        }
+        prefix.push(component.as_os_str());
+    }
     let mut ancestor = if output.is_absolute() {
         output.to_path_buf()
     } else {

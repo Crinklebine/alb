@@ -102,7 +102,8 @@ fn rejects_missing_input_files_and_ambiguous_missing_parents() {
         (file.clone(), f.0.join("out")),
         (source.clone(), file.clone()),
         (source.clone(), file.join("out")),
-        (source, f.0.join("missing/../out")),
+        // Keep the raw traversal: joining to a Windows verbatim root normalizes it.
+        (source, PathBuf::from("missing/../out")),
     ] {
         let text = diagnostic(f.run(&input, &output));
         assert!(!text.contains("Root paths validated"), "{text}");
