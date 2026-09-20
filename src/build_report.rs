@@ -57,13 +57,14 @@ impl BuildReport {
         }
         writeln!(
             file,
-            "TIMESTAMP POLICY: source times are readable UTC dates with nanosecond precision. Linux destination birth time cannot be restored; original birth time is archived here. Unavailable means the source filesystem did not supply it. Duplicate sources retain individual timestamp records; output mtime comes from the representative."
+            "TIMESTAMP POLICY: source times are readable UTC dates with nanosecond precision. {} Unavailable means the source filesystem did not supply it. Duplicate sources retain individual timestamp records; output mtime comes from the representative.",
+            crate::platform::CREATION_POLICY
         )?;
         for entry in &plan.entries {
             write_times(&mut file, entry)?;
         }
         file.sync_all()?;
-        directory.file.sync_all()?;
+        directory.sync()?;
         Ok(Self { file })
     }
     pub fn verified(&mut self, entry: &PlanEntry, duplicate: bool) -> io::Result<()> {

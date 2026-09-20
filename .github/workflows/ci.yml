@@ -1,0 +1,37 @@
+name: Native cross-platform checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            binary: alb
+          - os: macos-latest
+            binary: alb
+          - os: windows-latest
+            binary: alb.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo +stable fmt --check
+      - name: Test native filesystem behavior
+        run: cargo +stable test --locked
+      - name: Clippy
+        run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
+      - name: Build release
+        run: cargo +stable build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alb-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/${{ matrix.binary }}
+          if-no-files-found: error

@@ -73,7 +73,7 @@ where
                 continue;
             }
         };
-        if metadata.is_symlink() {
+        if crate::platform::is_link(&metadata) {
             catalog.skipped_symlinks += 1;
         } else if metadata.is_dir() {
             match read_directory(&path) {
@@ -123,7 +123,7 @@ mod tests {
                 let path = std::env::temp_dir()
                     .join(format!("alb-discovery-{}-{attempt}", std::process::id()));
                 match fs::create_dir(&path) {
-                    Ok(()) => return Self(path),
+                    Ok(()) => return Self(fs::canonicalize(path).unwrap()),
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(e) => panic!("cannot create fixture: {e}"),
                 }

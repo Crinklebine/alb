@@ -545,7 +545,6 @@ pub fn check_existing_output_mode(plan: &mut BuildPlan, resume: bool) {
                 && entry.issues.is_empty()
                 && entry.destination.as_ref().is_some_and(|p| p.exists())
             {
-                #[cfg(target_os = "linux")]
                 match crate::execution::verify_existing(entry) {
                     Ok(()) => entry
                         .notes
@@ -554,8 +553,6 @@ pub fn check_existing_output_mode(plan: &mut BuildPlan, resume: bool) {
                         .issues
                         .push(format!("resume destination verification failed: {e}")),
                 }
-                #[cfg(not(target_os = "linux"))]
-                entry.issues.push("resume requires Linux".into());
             }
         }
     }
@@ -607,7 +604,7 @@ fn check_destination(destination: &Path, resume: bool) -> Result<(), String> {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
-                if metadata.is_symlink() {
+                if crate::platform::is_link(&metadata) {
                     return Err(format!("output symlink is not followed: {current:?}"));
                 }
                 if index == parts.len() - 1 {
@@ -713,7 +710,7 @@ mod tests {
                 match fs::create_dir(&root) {
                     Ok(()) => {
                         fs::create_dir(root.join("source")).unwrap();
-                        return Self(root);
+                        return Self(fs::canonicalize(root).unwrap());
                     }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(e) => panic!("{e}"),

@@ -11,7 +11,7 @@ fn help_and_default_describe_current_scope() {
         assert!(output.stderr.is_empty());
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("Usage: alb [OPTIONS]"));
-        assert!(stdout.contains("Build execution requires Linux"));
+        assert!(stdout.contains("Build supports Linux, macOS and Windows"));
     }
 }
 

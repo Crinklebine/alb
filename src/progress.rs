@@ -19,7 +19,7 @@ impl Progress {
         let done = Arc::new(AtomicUsize::new(0));
         let count = done.clone();
         let (stop, receiver) = mpsc::channel();
-        let terminal = io::stderr().is_terminal();
+        let terminal = io::stderr().is_terminal() && crate::platform::terminal_progress_supported();
         if !terminal {
             eprintln!(
                 "{operation}: starting{}",

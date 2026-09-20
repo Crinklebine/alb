@@ -12,7 +12,7 @@ impl Fixture {
             let root =
                 std::env::temp_dir().join(format!("alb-paths-{}-{attempt}", std::process::id()));
             match fs::create_dir(&root) {
-                Ok(()) => return Self(root),
+                Ok(()) => return Self(fs::canonicalize(root).unwrap()),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => panic!("cannot create fixture: {error}"),
             }

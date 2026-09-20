@@ -6,10 +6,7 @@ use crate::{
 use std::{io, path::Path};
 const RESERVE: u64 = 16 * 1024 * 1024;
 pub fn available(directory: &Directory) -> io::Result<u64> {
-    let stat = rustix::fs::fstatvfs(&directory.file)?;
-    stat.f_bavail
-        .checked_mul(stat.f_frsize)
-        .ok_or_else(|| io::Error::other("available space overflow"))
+    directory.available_space()
 }
 pub fn required(bytes: u64, entries: usize) -> io::Result<u64> {
     let overhead = u64::try_from(entries)

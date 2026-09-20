@@ -7,14 +7,14 @@ Usage: alb [OPTIONS]
        alb scan --input SOURCE [--verbose] [--hash]
 
 Commands:
-  build           Build a verified output library (Linux)
+  build           Build a verified output library
   scan            Inspect source files without creating an output library
 
 Options:
   -h, --help       Print help
   -V, --version    Print version
 
-Build execution requires Linux; use --dry-run to preview without writes.
+Build supports Linux, macOS and Windows; use --dry-run to preview without writes.
 Use 'alb build --help' or 'alb scan --help' for command options.
 Source libraries must always remain immutable.";
 
@@ -34,13 +34,13 @@ Discovery counts regular files and skips all symlinks.
 Files are grouped by extension: FLAC, M4A, MP3, OGG, WAV, UNKNOWN.
 Basic metadata is read for all five supported types without changing files.
 Build copies through verified partial files and never overwrites destinations.
-Copies preserve source modification time; original creation time is archived in _ALB reports.
-Linux cannot restore original creation time as destination filesystem birth time.
+Copies preserve modification time; macOS/Windows also restore available creation time.
+Original timestamps are archived in _ALB reports on all platforms.
 Free space is checked before copying, with a safety allowance.
 File problems go to Problem Files/<Problem Type> with a text explanation.
 Unreadable files are reported; other files continue. Root/output safety failures are fatal.
 Terminal progress uses one status line; redirected stderr has stage summaries.
-Execution requires Linux with openat2 support. Failed partials are retained. Resume rechecks current sources and output bytes.";
+Execution uses native filesystem safety checks. Failed partials are retained. Resume rechecks current sources and output bytes.";
 
 pub const SCAN_HELP: &str = "Usage: alb scan --input SOURCE [--verbose] [--hash]
 

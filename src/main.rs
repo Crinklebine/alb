@@ -1,24 +1,20 @@
-#[cfg(target_os = "linux")]
 mod build_report;
 mod candidates;
 mod catalog;
 mod cli;
-#[cfg(any(target_os = "linux", test))]
 mod copying;
 mod discovery;
-#[cfg(target_os = "linux")]
 mod execution;
 mod hashing;
 mod inspection;
 mod paths;
 mod plan;
+mod platform;
 mod problems;
 mod progress;
 mod report;
-#[cfg(target_os = "linux")]
 mod safe_fs;
 mod source;
-#[cfg(target_os = "linux")]
 mod space;
 
 use std::{env, path::Path, process::ExitCode};
@@ -74,7 +70,6 @@ fn scan(
         problems::route(&mut plan, output);
         planning.set(catalog.files.len());
         drop(planning);
-        #[cfg(target_os = "linux")]
         let space_result = space::check(&plan, output, resume);
         let resolved = plan
             .entries
@@ -107,7 +102,6 @@ fn scan(
                 .count(),
             plan.metadata_warnings
         );
-        #[cfg(target_os = "linux")]
         if let Err(error) = space_result {
             eprintln!("error: {error}. No copying started.");
             return ExitCode::from(1);
@@ -122,7 +116,6 @@ fn scan(
                 ExitCode::from(1)
             };
         }
-        #[cfg(target_os = "linux")]
         match execution::execute_resilient(&plan, input, output, resume) {
             Ok(result) => {
                 eprintln!(
@@ -145,11 +138,6 @@ fn scan(
                 );
                 return ExitCode::from(1);
             }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            eprintln!("error: safe build execution currently requires Linux; use --dry-run");
-            return ExitCode::from(1);
         }
     }
     if let Some(hashes) = &hashes {

@@ -1,4 +1,4 @@
-//! Copy and verify bytes using handles secured by the Linux executor.
+//! Copy and verify bytes using handles secured by the platform backend.
 #[cfg(test)]
 use crate::paths;
 use crate::{hashing, source::SourceStamp};
@@ -16,14 +16,14 @@ pub fn transfer_verified(
     stamp: &SourceStamp,
     digest: [u8; 32],
 ) -> io::Result<()> {
-    if SourceStamp::from_metadata(&source.metadata()?)? != *stamp {
+    if SourceStamp::from_file(source)? != *stamp {
         return Err(io::Error::other("source changed before copy"));
     }
     let bytes = io::copy(
         &mut (&mut *source).take(stamp.len.saturating_add(1)),
         partial,
     )?;
-    if bytes != stamp.len || SourceStamp::from_metadata(&source.metadata()?)? != *stamp {
+    if bytes != stamp.len || SourceStamp::from_file(source)? != *stamp {
         return Err(io::Error::other("source changed during copy"));
     }
     partial.sync_all()?;
@@ -32,16 +32,10 @@ pub fn transfer_verified(
     if actual != digest || bytes != stamp.len {
         return Err(io::Error::other("partial verification failed"));
     }
-    if SourceStamp::from_metadata(&source.metadata()?)? != *stamp {
+    if SourceStamp::from_file(source)? != *stamp {
         return Err(io::Error::other("source changed during verification"));
     }
-    partial.set_times(std::fs::FileTimes::new().set_modified(stamp.modified))?;
-    if partial.metadata()?.modified()? != stamp.modified {
-        return Err(io::Error::other(
-            "destination cannot preserve source modification-time precision",
-        ));
-    }
-    partial.sync_all()?;
+    crate::platform::set_times(partial, stamp.modified, stamp.created)?;
     Ok(())
 }
 
@@ -76,7 +70,7 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 fn source_matches(request: &StageRequest<'_>, file: &File) -> io::Result<()> {
     if SourceStamp::at(request.source)? != *request.source_stamp
-        || SourceStamp::from_metadata(&file.metadata()?)? != *request.source_stamp
+        || SourceStamp::from_file(file)? != *request.source_stamp
     {
         return Err(io::Error::other("source changed; rescan required"));
     }
@@ -138,7 +132,7 @@ fn stage_with(
         return Err(io::Error::other("partial verification failed"));
     }
     source_matches(request, &source)?;
-    if SourceStamp::at(request.partial)? != SourceStamp::from_metadata(&partial.metadata()?)? {
+    if SourceStamp::at(request.partial)? != SourceStamp::from_file(&partial)? {
         return Err(io::Error::other("partial path changed during staging"));
     }
     Ok(())

@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 use std::{fs, path::PathBuf, process::Command};
 struct Fixture(PathBuf);
 impl Fixture {
@@ -9,7 +8,7 @@ impl Fixture {
             match fs::create_dir(&path) {
                 Ok(()) => {
                     fs::create_dir(path.join("in")).unwrap();
-                    return Self(path);
+                    return Self(fs::canonicalize(path).unwrap());
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => panic!("{e}"),
@@ -147,6 +146,7 @@ fn occupied_partial_is_preserved_and_file_is_quarantined() {
     assert!(!f.0.join("out/UNKNOWN/a.txt").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn report_symlink_cannot_redirect_writes_into_input() {
     let f = Fixture::new();
@@ -207,6 +207,7 @@ fn resume_reuses_verified_files_and_copies_missing_files_preserving_old_partials
         && s.ends_with("COMPLETE copied=1 duplicates=0 reused=1\n")));
 }
 
+#[cfg(unix)]
 #[test]
 fn resume_rejects_mismatched_bytes_and_symlinks_without_writes() {
     let f = Fixture::new();
@@ -381,7 +382,7 @@ fn archived_times_survive_normal_and_problem_copies() {
         time::{Duration, SystemTime},
     };
     let f = Fixture::new();
-    let time = SystemTime::UNIX_EPOCH + Duration::new(946684800, 123456789);
+    let time = SystemTime::UNIX_EPOCH + Duration::new(946684800, 123456700);
     for name in ["archive.txt", "broken.m4a"] {
         let path = f.0.join("in").join(name);
         fs::write(&path, b"archival bytes").unwrap();
@@ -418,7 +419,7 @@ fn archived_times_survive_normal_and_problem_copies() {
         .unwrap();
     assert_eq!(fs::metadata(copied).unwrap().modified().unwrap(), time);
     let report = f.report();
-    assert!(report.contains("modified=\"2000-01-01 00:00:00.123456789 UTC\""));
+    assert!(report.contains("modified=\"2000-01-01 00:00:00.123456700 UTC\""));
     if let Some(birth) = birth {
         let date: chrono::DateTime<chrono::Utc> = birth.into();
         assert!(report.contains(&format!(
@@ -443,4 +444,48 @@ fn archived_times_survive_normal_and_problem_copies() {
         time
     );
     assert!(resume(&f, false).status.success());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_junctions_are_skipped_and_never_receive_output() {
+    let f = Fixture::new();
+    let external = f.0.join("external");
+    fs::create_dir(&external).unwrap();
+    fs::write(external.join("private.txt"), b"outside").unwrap();
+    let source_link = f.0.join("in/junction");
+    let status = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&source_link)
+        .arg(&external)
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    fs::write(f.0.join("in/a.txt"), b"source").unwrap();
+    fs::create_dir(f.0.join("out")).unwrap();
+    let output_link = f.0.join("out/UNKNOWN");
+    let status = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&output_link)
+        .arg(&external)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let result = f.run();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read_dir(&external).unwrap().count(), 1);
+    assert_eq!(fs::read(external.join("private.txt")).unwrap(), b"outside");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("1 symlinks skipped"));
+    assert!(f.0.join("out/Problem Files/Destination Conflicts").exists());
+    // Remove the junction entries themselves before fixture cleanup.
+    fs::remove_dir(source_link).unwrap();
+    fs::remove_dir(output_link).unwrap();
 }

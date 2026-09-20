@@ -6,13 +6,13 @@ pub struct SourceStamp {
     pub len: u64,
     pub modified: SystemTime,
     pub created: Option<SystemTime>,
-    #[cfg(unix)]
     identity: (u64, u64, i64, i64),
 }
 
 impl SourceStamp {
-    pub fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
-        if !metadata.is_file() {
+    pub fn from_file(file: &fs::File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || crate::platform::is_link(&metadata) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "source is not a regular file",
@@ -22,21 +22,19 @@ impl SourceStamp {
             len: metadata.len(),
             modified: metadata.modified()?,
             created: metadata.created().ok(),
-            #[cfg(unix)]
-            identity: {
-                use std::os::unix::fs::MetadataExt;
-                (
-                    metadata.dev(),
-                    metadata.ino(),
-                    metadata.ctime(),
-                    metadata.ctime_nsec(),
-                )
-            },
+            identity: crate::platform::identity(file)?,
         })
     }
 
     pub fn at(path: &Path) -> io::Result<Self> {
-        Self::from_metadata(&fs::symlink_metadata(path)?)
+        let metadata = fs::symlink_metadata(path)?;
+        if crate::platform::is_link(&metadata) || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source is not a regular file",
+            ));
+        }
+        Self::from_file(&crate::platform::open_snapshot(path)?)
     }
 }
 

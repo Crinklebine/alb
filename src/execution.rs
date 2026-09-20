@@ -34,18 +34,15 @@ fn open_source(input: &Directory, root: &Path, entry: &PlanEntry) -> io::Result<
         .map_err(|_| invalid("source outside input"))?;
     let (parent, name) = input.parent(relative, false)?;
     let file = parent.read(&name)?;
-    if SourceStamp::from_metadata(&file.metadata()?)? != *stamp(entry)? {
+    if SourceStamp::from_file(&file)? != *stamp(entry)? {
         return Err(io::Error::other("source changed; rescan required"));
     }
     Ok(file)
 }
 fn verify_file(mut file: File, expected: [u8; 32], size: u64) -> io::Result<()> {
-    let before = SourceStamp::from_metadata(&file.metadata()?)?;
+    let before = SourceStamp::from_file(&file)?;
     let (actual, bytes) = hashing::hash_reader(&mut file)?;
-    if actual != expected
-        || bytes != size
-        || SourceStamp::from_metadata(&file.metadata()?)? != before
-    {
+    if actual != expected || bytes != size || SourceStamp::from_file(&file)? != before {
         return Err(io::Error::other("published file verification failed"));
     }
     Ok(())
@@ -67,11 +64,11 @@ pub fn verify_existing(entry: &PlanEntry) -> io::Result<()> {
         .ok_or_else(|| invalid("missing filename"))?;
     parent.check_alias(name)?;
     let file = parent.read(name)?;
-    if file.metadata()?.modified()? != stamp(entry)?.modified {
-        return Err(io::Error::other(
-            "existing output modification time differs from original source",
-        ));
-    }
+    crate::platform::verify_times(
+        &file.metadata()?,
+        stamp(entry)?.modified,
+        stamp(entry)?.created,
+    )?;
     verify_file(file, digest(entry)?, stamp(entry)?.len)
 }
 #[cfg(test)]
@@ -156,8 +153,8 @@ pub fn execute(
         };
         copying::transfer_verified(&mut source, &mut partial, stamp(entry)?, digest(entry)?)?;
         open_source(&input, &roots.input, entry)?; // Also confirm the path still identifies this source.
-        let partial_stamp = SourceStamp::from_metadata(&partial.metadata()?)?;
-        if SourceStamp::from_metadata(&parent.read(&partial_name)?.metadata()?)? != partial_stamp {
+        let partial_stamp = SourceStamp::from_file(&partial)?;
+        if SourceStamp::from_file(&parent.read(&partial_name)?)? != partial_stamp {
             return Err(io::Error::other("partial path changed before publication"));
         }
         parent.publish(&partial_name, &name)?;
@@ -214,11 +211,11 @@ fn copy_one(
         match parent.read(&name) {
             Ok(file) => {
                 parent.check_alias(&name)?;
-                if file.metadata()?.modified()? != stamp(entry)?.modified {
-                    return Err(io::Error::other(
-                        "existing output modification time differs from source; preserve a new problem copy without changing existing files",
-                    ));
-                }
+                crate::platform::verify_times(
+                    &file.metadata()?,
+                    stamp(entry)?.modified,
+                    stamp(entry)?.created,
+                )?;
                 verify_file(file, digest(entry)?, stamp(entry)?.len)?;
                 let source = open_source(input, input_root, entry)?;
                 verify_file(source, digest(entry)?, stamp(entry)?.len)?;
@@ -251,8 +248,8 @@ fn copy_one(
     };
     copying::transfer_verified(&mut source, &mut partial, stamp(entry)?, digest(entry)?)?;
     open_source(input, input_root, entry)?; // Also confirm the path still identifies this source.
-    let partial_stamp = SourceStamp::from_metadata(&partial.metadata()?)?;
-    if SourceStamp::from_metadata(&parent.read(&partial_name)?.metadata()?)? != partial_stamp {
+    let partial_stamp = SourceStamp::from_file(&partial)?;
+    if SourceStamp::from_file(&parent.read(&partial_name)?)? != partial_stamp {
         return Err(io::Error::other("partial path changed before publication"));
     }
     parent.publish(&partial_name, &name)?;
@@ -283,7 +280,7 @@ fn sidecar(output: &Directory, root: &Path, entry: &PlanEntry, outcome: &str) ->
         }
         match parent.read(&chosen) {
             Ok(mut file) => {
-                SourceStamp::from_metadata(&file.metadata()?)?;
+                SourceStamp::from_file(&file)?;
                 let mut bytes = Vec::new();
                 std::io::Read::by_ref(&mut file)
                     .take(text.len() as u64 + 1)
@@ -387,11 +384,9 @@ pub fn execute_resilient(
                             .map_err(|_| invalid("source outside input"))?;
                         let (parent, name) = input.parent(relative, false)?;
                         let mut file = parent.read(&name)?;
-                        let before = SourceStamp::from_metadata(&file.metadata()?)?;
+                        let before = SourceStamp::from_file(&file)?;
                         let (hash, bytes) = hashing::hash_reader(&mut file)?;
-                        if bytes != before.len
-                            || SourceStamp::from_metadata(&file.metadata()?)? != before
-                        {
+                        if bytes != before.len || SourceStamp::from_file(&file)? != before {
                             return Err(io::Error::other("source changed while retrying read"));
                         }
                         entry.source_stamp = Some(before);
@@ -512,7 +507,7 @@ mod tests {
                 match fs::create_dir(&path) {
                     Ok(()) => {
                         fs::create_dir(path.join("in")).unwrap();
-                        return Self(path);
+                        return Self(fs::canonicalize(path).unwrap());
                     }
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(e) => panic!("{e}"),
@@ -680,6 +675,7 @@ mod tests {
         assert!(PathBuf::from(format!("{}.alb-partial", dest.display())).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn output_symlink_to_input_is_refused() {
         let f = Fixture::new();
@@ -692,6 +688,7 @@ mod tests {
         assert_eq!(fs::read(f.0.join("in/a.txt")).unwrap(), b"source");
     }
 
+    #[cfg(unix)]
     #[test]
     fn pinned_parent_and_atomic_publication_resist_replacement() {
         let f = Fixture::new();

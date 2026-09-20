@@ -115,9 +115,10 @@ pub fn route(plan: &mut BuildPlan, output: &Path) {
 }
 pub fn description(entry: &PlanEntry, outcome: &str) -> String {
     let timestamps = format!(
-        "Original modified time (UTC): {}\nOriginal creation time (UTC): {}\nLinux destination creation time cannot be restored; this is the original source record.\n",
+        "Original modified time (UTC): {}\nOriginal creation time (UTC): {}\n{}\n",
         crate::source::timestamp(entry.source_stamp.as_ref().map(|s| s.modified)),
-        crate::source::timestamp(entry.source_stamp.as_ref().and_then(|s| s.created))
+        crate::source::timestamp(entry.source_stamp.as_ref().and_then(|s| s.created)),
+        crate::platform::CREATION_POLICY
     );
     format!(
         "ALB problem file\nSource: {:?}\nDestination: {:?}\nOutcome: {outcome}\n{timestamps}\n{}\n\nThe source was not modified. Review its metadata or the reported filesystem error.\n",

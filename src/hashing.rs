@@ -94,13 +94,13 @@ fn hash_track_with(
     if &SourceStamp::at(&track.source_path)? != expected {
         return Err(changed());
     }
-    let mut file = fs::File::open(&track.source_path)?;
-    if &SourceStamp::from_metadata(&file.metadata()?)? != expected {
+    let mut file = crate::platform::open_snapshot(&track.source_path)?;
+    if &SourceStamp::from_file(&file)? != expected {
         return Err(changed());
     }
     let (digest, bytes) = read(&mut file)?;
     if bytes != expected.len
-        || &SourceStamp::from_metadata(&file.metadata()?)? != expected
+        || &SourceStamp::from_file(&file)? != expected
         || &SourceStamp::at(&track.source_path)? != expected
     {
         return Err(changed());
@@ -176,7 +176,7 @@ mod tests {
                 let path = std::env::temp_dir()
                     .join(format!("alb-hashing-{}-{attempt}", std::process::id()));
                 match fs::create_dir(&path) {
-                    Ok(()) => return Self(path),
+                    Ok(()) => return Self(fs::canonicalize(path).unwrap()),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(error) => panic!("cannot create fixture: {error}"),
                 }

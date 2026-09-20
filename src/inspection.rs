@@ -85,15 +85,13 @@ fn inspect_known(path: &Path) -> Result<Track, InspectionError> {
         return Err(InspectionError::NotRegularFile);
     }
     let expected = SourceStamp::at(path).map_err(InspectionError::Io)?;
-    let mut file = fs::File::open(path).map_err(InspectionError::Io)?;
-    let opened = SourceStamp::from_metadata(&file.metadata().map_err(InspectionError::Io)?)
-        .map_err(InspectionError::Io)?;
+    let mut file = crate::platform::open_snapshot(path).map_err(InspectionError::Io)?;
+    let opened = SourceStamp::from_file(&file).map_err(InspectionError::Io)?;
     if opened != expected {
         return Err(InspectionError::SourceChanged);
     }
     let mut track = read_metadata(path, &mut file)?;
-    let after = SourceStamp::from_metadata(&file.metadata().map_err(InspectionError::Io)?)
-        .map_err(InspectionError::Io)?;
+    let after = SourceStamp::from_file(&file).map_err(InspectionError::Io)?;
     if after != expected || SourceStamp::at(path).map_err(InspectionError::Io)? != expected {
         return Err(InspectionError::SourceChanged);
     }
