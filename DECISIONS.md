@@ -248,3 +248,27 @@ Use YYYY-MM-DD HH:MM:SS.nnnnnnnnn UTC for creation and modified times in new
 run reports and problem explanations. Retain nanosecond precision, handle dates
 before 1970 correctly, and label unavailable values explicitly. Use released
 Chrono 0.4.45 without default/clock features. Existing audit files stay immutable.
+
+## 0.2.0 — Native platform boundary
+
+Keep sorting and verification common. Compile-time platform modules implement
+safe Directory operations, no-replace publication, locking, identity, free space,
+timestamps and terminal support. A shared Unix backend uses Linux openat2 or
+macOS no-follow single-component openat with device checks. macOS exclusive
+publication uses renameatx_np through released rustix.
+
+Windows opens every ancestor without FILE_SHARE_DELETE and retains the handles
+for each derived directory's lifetime. That pins absolute paths against ancestor
+replacement; final opens reject all reparse points. Use no-replace, write-through
+MoveFileEx and an exclusive, persistent .alb-build.lock handle. Do not pretend
+directory fsync is available on Windows; document filesystem-dependent durability.
+
+Replace metadata-only source identity with handle-based identity on all systems,
+including Windows volume ID, file ID and change time. Restore available creation
+time on macOS/Windows through native APIs after mtime, verifying the results.
+Existing output files are never retimestamped. Linux still archives birth time.
+
+Native CI runs tests, strict Clippy and release builds on all three platforms,
+including Windows junction and ancestor-pinning tests. Linux-host cross-compilation
+uses pure BLAKE3 only to avoid needing cross C assemblers; native production builds
+retain default acceleration.

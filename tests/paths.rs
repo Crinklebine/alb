@@ -149,7 +149,7 @@ fn resolves_symlink_aliases_and_rejects_dangling_links_and_loops() {
     assert!(!f.0.join("missing").exists());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn validates_real_non_unicode_paths_without_lossy_comparison() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};

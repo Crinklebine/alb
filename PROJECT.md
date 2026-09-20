@@ -85,9 +85,9 @@ missing or unreadable tags, not as a substitute for implementing an adapter.
 Continue automated synthetic-fixture testing during development. Safe build
 execution and end-to-end automated checks are also required before user testing.
 
-## Initial execution platform and recovery
+## Execution platforms and recovery
 
-Linux is the first execution target; other platforms retain scan/dry-run. Require
+Linux, macOS and Windows have native filesystem backends behind a shared interface. Require
 directory-handle operations and atomic no-replace publication, failing closed if
 unsupported. Stable trees under user control are required; hostile directory
 relocation or mount manipulation is outside the supported operating model.
@@ -109,9 +109,9 @@ use bounded stage summaries. This supersedes earlier all-plan blocking rules.
 ## Archival requirements
 
 Preserve original source modification time on new copies and archive original
-per-source creation/modified times. Linux filesystem birth time cannot be restored
-through ordinary APIs, so retain it explicitly in durable audit records and mark
-unavailable values honestly. Never mistake ctime for creation time or mutate an
+per-source creation/modified times. Restore filesystem birth time on macOS/Windows when supplied; Linux birth time
+cannot be restored through ordinary APIs, so retain it explicitly in durable audit
+records on all platforms and mark unavailable values honestly. Never mistake ctime for creation time or mutate an
 existing output inode that may be hardlinked to source.
 Check destination available capacity before writes, with overhead allowance and
 per-copy rechecks. Initial insufficient capacity is a global safety stop.

@@ -283,11 +283,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn preserves_non_unicode_names_and_skips_fifo() {
-        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        use std::ffi::OsString;
+        #[cfg(not(target_os = "macos"))]
+        use std::os::unix::ffi::OsStringExt;
         let f = Fixture::new();
         let mut expected = Vec::new();
-        for byte in [0xff, 0xfe] {
-            let path = f.0.join(OsString::from_vec(vec![b'x', byte]));
+        // APFS rejects non-UTF-8 names. Exercise the FIFO behavior there too,
+        // with Unicode names; Linux separately covers opaque byte names.
+        #[cfg(target_os = "macos")]
+        let names = [OsString::from("café"), OsString::from("日本語")];
+        #[cfg(not(target_os = "macos"))]
+        let names = [
+            OsString::from_vec(vec![b'x', 0xff]),
+            OsString::from_vec(vec![b'x', 0xfe]),
+        ];
+        for name in names {
+            let path = f.0.join(name);
             fs::write(&path, b"fixture").unwrap();
             expected.push(path);
         }

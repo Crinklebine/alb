@@ -1,19 +1,12 @@
 # Next steps
 
-Installed version: 0.1.6. File-level problems now route to Problem Files with
-explanations, unaffected work continues, and terminal status updates in place.
+Cross-platform version: 0.2.0.
 
-1. Repeat the user's dry-run and review problem counts and planned destinations.
-2. Build into the separate output, then review Problem Files text explanations
-   and the _ALB audit. Do not modify source metadata to work around ALB.
-3. Address further real-world failures with focused synthetic regressions.
+1. Complete native CI on Linux, macOS and Windows; resolve any platform-specific
+   failures before treating the release as ready.
+2. Use small user-owned samples on APFS and NTFS before full-library trials.
+3. Broaden filesystem/network-volume qualification and evaluate large-library
+   performance. Do not add audio analysis or weaken source safety.
 
-Never weaken root safety or report unreadable/unverified files as copied.
-Large-library scale/performance and broader filesystem qualification remain.
-
-Verify source/output modification times during the next trial. Retain _ALB audit
-reports: original creation times are archived there because Linux cannot set
-destination birth times. Review the capacity estimate before the full build.
-
-Build console output is now summary-only; detailed plans live in the _ALB run
-report. Dry-run remains read-only with summary counts and no report creation.
+Portable workflow: dry-run summary, build, inspect Problem Files explanations and
+_ALB audit, then resume dry-run. Preserve _ALB as archival metadata.

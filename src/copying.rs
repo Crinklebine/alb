@@ -158,7 +158,7 @@ mod tests {
                     let p =
                         std::env::temp_dir().join(format!("alb-stage-{}-{n}", std::process::id()));
                     match fs::create_dir(&p) {
-                        Ok(()) => Some(p),
+                        Ok(()) => Some(fs::canonicalize(p).unwrap()),
                         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
                         Err(e) => panic!("{e}"),
                     }

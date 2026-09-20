@@ -1,213 +1,163 @@
 # ALB — Audio Library Builder
 
-A Rust command-line sorter for rebuilding a large audio library into a separate
-organized output tree. Input is always read-only.
+A Rust command-line tool for rebuilding an audio library into a separate organized
+output tree. Source files are never moved, deleted, retagged or intentionally
+timestamped. Supports **Linux, macOS and Windows**.
 
-## Current commands
-
-```sh
-cargo run -- scan --input /path/to/source
-cargo run -- scan --input /path/to/source --verbose --hash
-cargo run -- build --input /path/to/source --output /path/to/library --dry-run
-```
-
-Scan reports discovery and catalog counts. `--verbose` prints escaped per-file
-metadata/errors; `--hash` reports exact whole-file duplicates within each file
-type. Scan exits 0 on success, 1 on operational/metadata/report errors, 2 on usage
-errors. Metadata errors do not remove files from the catalog.
-
-Build execution is available on Linux. Preview first, then omit `--dry-run` to
-copy into a separate output tree:
+## Commands
 
 ```sh
-cargo run -- build --input /path/to/source --output /path/to/library
-cargo run -- build --input /path/to/source --output /path/to/library --resume
+alb scan --input /path/to/source
+alb scan --input /path/to/source --verbose --hash
+alb build --input /path/to/source --output /path/to/library --dry-run
+alb build --input /path/to/source --output /path/to/library
+alb build --input /path/to/source --output /path/to/library --resume
 ```
 
-`--dry-run` hashes every catalog file and shows summary counts without creating files or directories. Detailed source/destination
-mappings, hashes and decisions are retained only in the build run report.
-Build/dry-run exit 0 when all files are handled, 1 on unhandled read/write or safety failures,
-and 2 on usage errors. File-level problems are preserved under Problem Files with explanations.
-There is no audio-analysis command.
+Windows example (PowerShell):
 
-Build verifies partial-file size and BLAKE3, atomically publishes without replacing
-an existing destination, then verifies published bytes. Exact duplicates are
-omitted only after their representative is verified. Synced audit reports in
-`_ALB/build-*.txt` record the plan, hash evidence and verified results. A missing
-`COMPLETE` line means the run did not record successful completion.
+```powershell
+alb.exe build --input "D:\Music" --output "E:\Library" --dry-run
+```
 
-`--resume` regenerates the plan from current sources and verifies existing outputs
-before reusing them. Mismatched destinations route source files into Problem Files without overwriting them. Missing files are
-copied; old partial files remain untouched and a new partial name is reserved.
-Resume does not parse or trust prior audit reports. Combining `--resume --dry-run`
-verifies reusable destinations without writing.
+Use `alb --help`, `alb build --help`, or `alb scan --help` for all switches.
+Options take separate values. Build output is progress and summaries only;
+full per-file plans and results are retained in `_ALB/build-*.txt`.
 
-## Extension-only organization
+- **Scan:** read-only inventory, classification and metadata. `--verbose` shows
+  per-file information; `--hash` reports same-type exact duplicates.
+- **Dry-run:** reads metadata, hashes files, plans destinations and checks space.
+  Shows summary counts; creates no files, directories or reports.
+- **Build:** verifies partial copies, publishes without replacement, verifies
+  published bytes and records results. Continues after individual file problems.
+- **Resume:** regenerates the plan and verifies existing outputs before reuse.
+  Old partials and mismatched outputs stay untouched. Incomplete copies restart
+  under new exclusive partial names; audit files are not used as trusted state.
 
-| Final extension, ignoring case | Output group |
+Exit status: 0 when requested work is handled, 1 for unhandled operational/safety
+failures (or scan inspection errors), 2 for usage errors. Successfully quarantined
+problem files do not cause build failure.
+
+## Organization
+
+Classification is solely by final extension, ignoring case:
+
+| Extension | Output group |
 | --- | --- |
-| .flac | FLAC/ |
-| .m4a | M4A/ |
-| .mp3 | MP3/ |
-| .ogg | OGG/ |
-| .wav | WAV/ |
-| Everything else | UNKNOWN/ |
+| .flac | FLAC |
+| .m4a | M4A |
+| .mp3 | MP3 |
+| .ogg | OGG |
+| .wav | WAV |
+| Anything else | UNKNOWN |
 
-M4A/OGG internals never change the group. Unknown files are preserved and reported.
-For example, .m4b, .mp4, .opus and .oga currently belong to UNKNOWN.
-
-All five supported formats have thin metadata readers for sorting tags and optional
-duration. Primary tags take precedence; secondary tags fill absent fields. Generic planning uses available metadata:
+For example, .m4b, .mp4, .opus, .oga and .wave are UNKNOWN. M4A and OGG internal
+codecs never change the group. All five known types have sorting-metadata readers.
 
 ```text
 TYPE/Album Artist or Artist/Album/[DISC-]TRACK - TITLE - ARTIST.extension
-TYPE/Artist/Loose Tracks/Title - Artist.extension  # missing or blank album
-Problem Files/Problem Type/             # problematic files plus .txt explanations
-UNKNOWN/source-relative-path           # unsupported extension
-_ALB/                                  # durable build audit reports
+TYPE/Artist/Loose Tracks/Title - Artist.extension
+UNKNOWN/source-relative-path
+Problem Files/Problem Type/short name [source-path hash].extension
+_ALB/build-*.txt
 ```
 
-Loose tracks use track artist and omit track/disc numbering; this does not classify
-commercial singles. Naming sanitizes components and unifies normalized folder spellings deterministically.
-Conflicting filenames receive stable source-path-based suffixes, preserving every
-non-identical file. The plan reports competing sources and chosen destinations. Metadata errors remain visible in the plan and problem explanations.
-Exact duplicate groups use BLAKE3 over whole files, only within the same type.
-Dry-run selects the first eligible source path in native sort order as the
-representative, retaining hash/source-stamp evidence. Its duplicates point to the
-same destination. Hash failures or changed sources are reported as problems; an unverified
-representative cannot authorize omission. UNKNOWN files retain separate planned
-copies even when their hashes match. Cross-type copies stay separate. No audio-equivalence or quality analysis occurs.
+Missing/blank albums with usable artist/title use Loose Tracks. Other metadata
+problems are retained in Problem Files. Names are sanitized conservatively.
+Normalized folder aliases use deterministic spelling; different files targeting
+one filename receive distinct source-path-based suffixes. No arbitrary winner
+is selected. Names assume unchanged input roots and conflict membership.
 
-## Safety and limitations
+Dedupe uses whole-file BLAKE3 within each known type, never decoded audio.
+A duplicate is omitted only after a verified representative exists. UNKNOWN
+files and problem files retain independent copies. Cross-type files remain separate.
+No audio-validity, audio-equivalence or quality claim is made.
 
-Equal or nested input/output roots are rejected. Discovery skips symlinks and
-special files, keeps hardlink paths, and reports per-file errors. Source stamps
-check for detectable changes during metadata reads and hashing. Existing-output
-checks detect occupied paths and conservative case/Unicode aliases.
-Linux builds anchor operations to directory handles, reject symlink traversal and
-subtree mount crossings, and lock output against another ALB build. The kernel and
-filesystem must support openat2, exclusive creation, directory sync, flock and
-atomic no-replace rename; unsupported operations fail without an unsafe fallback.
-Scan/dry-run remain available on other platforms.
+## Problem Files and reports
 
-Use stable input/output trees under your control. Directory handles prevent
-symlink redirection, but ALB cannot protect against a hostile same-user process
-moving already-open directories into input, changing mounts, or mutating files
-after verification. Case/NFC checks are conservative, not universal filesystem
-collation. Reads may update OS access times. No source is renamed, moved, deleted,
-retagged or intentionally timestamped.
+File-level errors do not stop unrelated work. Classes include missing metadata,
+metadata parsing, long paths, read errors, destination conflicts and copy errors.
+Each handled problem copy has an adjacent text explanation with the source path,
+original destination, detailed causes and outcome.
 
-Interrupted builds retain completed files and recognizable `.alb-partial` files.
-Resume starts incomplete copies again; it does not continue at a byte offset or
-delete old partials. Audit reports are not a portable machine-readable manifest.
-An unchanged source snapshot is recommended for predictable resume planning.
+If a source cannot be read or verified, its explanation says **NOT COPIED**;
+ALB continues and returns 1 after reporting failures. Unwritable problem storage
+is recorded in the audit. Root isolation, output-lock and audit failures remain
+fatal because safe, truthful execution is no longer possible.
 
-## Development
+Reports are synced append-only records. A final `COMPLETE` marker records successful
+handling; `FINISHED_WITH_ERRORS` records remaining failures. Missing completion
+indicates interruption. Existing explanations are reused only when identical;
+changed explanations receive new numbered names.
+
+## Platform filesystem backends
+
+The sorter, catalog, planner, copy verifier, reports and recovery logic are shared.
+`src/platform/` implements the filesystem boundary:
+
+| Operation | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Confined directory access | Directory handles and openat2 | Directory handles and single-component openat | Pinned ancestor handles, no delete sharing |
+| Link protection | NOFOLLOW / NO_SYMLINKS | NOFOLLOW | OPEN_REPARSE_POINT; reject all reparse points |
+| No-replace publication | renameat2 NOREPLACE | renameatx_np EXCL | MoveFileEx without replacement, write-through |
+| Output lock | Directory flock | Directory flock | Exclusive .alb-build.lock handle |
+| Space query | fstatvfs | fstatvfs | GetDiskFreeSpaceEx |
+| Modification time | Restored | Restored | Restored |
+| Available creation time | Archived in report | Restored and archived | Restored and archived |
+
+Windows retains an empty `.alb-build.lock` in output; it is not a stale lock after
+the process exits. Windows junctions, mount reparse points and cloud-placeholder
+reparse files are skipped/refused rather than followed. macOS/Linux refuse subtree
+mount crossings during execution.
+
+New copies must retain exact source timestamp precision or report a problem.
+Dates in audits and problem explanations use
+`YYYY-MM-DD HH:MM:SS.nnnnnnnnn UTC`. Unsupported source creation times are marked
+unavailable, never substituted with ctime. Keep `_ALB` reports as part of the archive.
+Each duplicate source retains its own timestamps in the audit; the shared output
+uses the representative's times. Existing files are never retimestamped, including
+files that might be hardlinked to source.
+
+Linux/macOS sync parent directories as well as files. Windows flushes new files
+and requests write-through publication; it has no general directory-flush API.
+Crash durability therefore depends on the filesystem. Supported operations are
+required; ALB does not fall back to overwriting or following links.
+
+## Space, progress and safety
+
+Capacity estimates include planned new copy bytes, 1% of those bytes, 16 KiB per
+source for metadata/reports and a 16 MiB reserve. Verified resume outputs and
+omitted duplicates do not add copy bytes. Check before output creation, again
+before execution and before each new copy. This does not reserve capacity or
+guarantee every quota/allocation condition.
+
+Terminal status shows an updating operation/count line. Windows enables virtual
+terminal output when available; redirected/unsupported consoles use bounded
+stage messages instead of escape sequences.
+
+Use stable trees under your control. ALB rejects equal/nested roots, skips source
+links and special files, and never overwrites destinations. No protection is
+claimed against hostile same-user mutation after verification, arbitrary mount
+changes or relocation of already-open Unix directories into source. Reads may
+update OS access times. Case/Unicode collision rules are conservative, not a
+complete model of every filesystem. Start with a small copied sample and separate
+output before processing a full library.
+
+## Build and test
+
+Rust 1.89 or later; edition 2024. Released registry dependencies only.
 
 ```sh
+cargo build --release --locked
+cargo test --locked
 cargo fmt --check
-cargo test
-cargo clippy --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo install --path . --locked
 ```
 
-Released dependencies: Lofty, BLAKE3, unicode-normalization and Linux-only rustix. No vendored decoder
-or dependency patches. Synthetic metadata tests need no runtime audio encoder.
-Read PROJECT.md, STATUS.md, DECISIONS.md and NEXT.md when resuming work.
+Executable: `target/release/alb` on Linux/macOS, `target/release/alb.exe` on Windows.
+The native GitHub Actions matrix tests all three platforms and uploads release
+executables as workflow artifacts. Build locally for other CPU architectures.
+Synthetic audio fixtures require no encoder during tests.
 
-## First controlled test
-
-Build the executable with `cargo build --release --locked`. From the project root,
-run `./target/release/alb` with the same arguments shown above.
-
-The metadata and automated execution gates are met for a Linux trial. Use a small
-copied sample of your library and a fresh, separate output folder. Review a dry-run,
-build it, inspect the organized output and `_ALB` report, then try a resume dry-run.
-Keep the source and output trees stable while ALB runs. Start with this limited
-trial before attempting the full library.
-
-### Version 0.1.1 — collision handling
-
-Verified plans unify folder aliases (case, Unicode normalization and sanitization)
-using the first source-sorted spelling. Different files targeting one filename
-each get a deterministic source-path hash suffix; exact duplicates follow their
-representative's resolved destination. Reserved names are checked again to avoid
-secondary collisions. No existing output is overwritten. Unsafe paths, missing
-hash evidence and names that cannot fit the path budget still block the build.
-
-Names are stable for the same source tree; adding/removing conflicting sources
-or changing input paths can change planned names. Resume never deletes older
-outputs. A final summary shows resolved conflicts and up to ten remaining blockers.
-
-## 0.1.2 — Album tracks without track numbers
-
-Missing or zero track numbers no longer block album tracks with usable artist,
-album and title tags. Preserve the album folder and use Title - Artist.extension,
-without guessing numbering. Record a warning in the plan; ordinary collision
-resolution still preserves conflicting files. Source tags are never changed.
-
-## Version 0.1.3 — Problem Files and progress
-
-A file-level problem does not stop other files. Missing metadata (including unusable
-track numbers), metadata parsing errors, overlong planned paths, output conflicts
-and copy failures are routed beneath `Problem Files/<Problem Type>/`.
-Names combine a shortened source basename with a deterministic source-path hash.
-Every successfully handled problem copy has an adjacent `.txt` explanation with
-the source path, original destination, detailed causes and copy outcome.
-
-If a file cannot be read or verified, its explanation says NOT COPIED; ALB
-continues with other files and exits 1 after reporting the failures. Discovery
-failures get explanations when output remains writable. If explanations cannot
-be written, the _ALB audit records that failure. It cannot promise a problem copy
-for unreadable/missing sources or an unwritable output.
-
-Equal/nested roots, an unavailable output root/lock, or inability to create/update
-the audit are global safety failures. Sources are never modified and output files
-are never overwritten. Existing explanation files are reused only when identical;
-changed explanations get new numbered names.
-
-Interactive stderr shows one updating spinner/count line for discovery, metadata,
-hashing, planning and copy/verification. Redirected stderr gets start/end stage
-summaries without terminal control codes. Dry-run previews problem routing but
-creates neither problem copies nor explanations.
-
-## Version 0.1.4 — Archival timestamps and capacity checks
-
-New normal and Problem Files copies preserve the source modification time,
-including fractional seconds where supported. A filesystem that cannot retain
-the exact value produces a reported copy error rather than silently losing precision.
-Source files are never timestamped by ALB.
-
-Linux does not expose a normal API to restore a copied file's filesystem birth
-time. Original source creation time is therefore preserved in per-source
-SOURCE_TIMES records inside the _ALB audit, alongside original modification time.
-Values are readable UTC dates with nanosecond precision; unavailable source
-birth times are explicitly marked unavailable, never substituted with ctime.
-Keep the _ALB reports as part of the archive. Problem explanations include these
-times too. A duplicate's own timestamps remain in the audit; its shared output
-file uses the representative's modification time.
-
-Resume verifies modification time as well as file bytes. An older output with
-different modification time is left untouched and the source is preserved as
-a new Problem Files copy; existing files, including hardlinks, are never retimestamped.
-
-Dry-run and build estimate free space on the destination filesystem before writes.
-The estimate includes planned copies, 1% of their bytes, 16 KiB per source for
-metadata/reports, and a 16 MiB reserve. Verified resume outputs and omitted exact
-duplicates do not add copy bytes. ALB repeats the check before execution and before
-each new file copy. Insufficient initial space stops the run before output creation.
-This is a conservative check, not a space reservation: quotas, concurrent writers,
-filesystem allocation and unexpectedly large reports can still cause write failures.
-
-## Version 0.1.5 — Quiet build output
-
-Build and dry-run show progress, capacity checks and summary counts only.
-Per-file SOURCE/ACTION/BLAKE3/PROPOSED/NOTE details remain in _ALB/build-*.txt for
-actual builds. Dry-run creates no report or other output. Explicit scan --verbose
-and scan --hash retain their requested detail.
-
-## Version 0.1.6 — Readable archival dates
-
-Creation and modification times in new _ALB reports and Problem Files explanations
-use `YYYY-MM-DD HH:MM:SS.nnnnnnnnn UTC`, retaining fractional precision.
-Example: `2000-01-01 00:00:00.123456789 UTC`. Missing dates remain unavailable.
-Existing reports are retained unchanged.
+See PROJECT.md, STATUS.md, DECISIONS.md and NEXT.md for project context.
