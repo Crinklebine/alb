@@ -41,11 +41,13 @@ fn open(
     directory: bool,
 ) -> io::Result<File> {
     let path = wide(path)?;
+    // Shared copy/report code explicitly syncs completed data and audit records.
+    // Write-through here would flush every formatting fragment separately.
     let flags = FILE_FLAG_OPEN_REPARSE_POINT
         | if directory {
             FILE_FLAG_BACKUP_SEMANTICS
         } else {
-            FILE_FLAG_WRITE_THROUGH
+            0
         };
     // SAFETY: terminated UTF-16 input, null optional parameters, returned HANDLE checked.
     let handle = unsafe {
