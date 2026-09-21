@@ -4,6 +4,17 @@ A Rust command-line tool for rebuilding an audio library into a separate organiz
 output tree. Source files are never moved, deleted, retagged or intentionally
 timestamped. Supports **Linux, macOS and Windows**.
 
+## Install
+
+ALB is distributed through [crates.io](https://crates.io/crates/alb). With Rust
+and Cargo installed, run:
+
+```sh
+cargo install alb
+```
+
+GitHub Releases are not used for distribution.
+
 ## Commands
 
 ```sh
@@ -156,9 +167,10 @@ cargo install --path . --locked
 ```
 
 Executable: `target/release/alb` on Linux/macOS, `target/release/alb.exe` on Windows.
-The manually started GitHub Actions matrix tests all three platforms and uploads
-stripped release executables as compressed workflow artifacts, retained for three
-days. Build locally for other CPU architectures.
+The manually started GitHub Actions matrix tests all three platforms and verifies
+release builds. Compressed, stripped executables are temporary CI artifacts,
+retained for one day; they are not distribution releases. Install from crates.io
+for normal use. Build locally for other CPU architectures.
 Synthetic audio fixtures require no encoder during tests.
 
 See PROJECT.md, STATUS.md, DECISIONS.md and NEXT.md for project context.

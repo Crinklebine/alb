@@ -32,7 +32,7 @@ jobs:
         run: cargo +stable test --locked
       - name: Clippy
         run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
-      - name: Build release
+      - name: Verify release build
         env:
           CARGO_PROFILE_RELEASE_STRIP: symbols
           CARGO_PROFILE_RELEASE_DEBUG: "0"
@@ -42,5 +42,5 @@ jobs:
           name: alb-${{ runner.os }}-${{ runner.arch }}
           path: target/release/${{ matrix.binary }}
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1
           compression-level: 9
