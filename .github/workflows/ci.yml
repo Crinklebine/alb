@@ -33,9 +33,14 @@ jobs:
       - name: Clippy
         run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
       - name: Build release
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
         run: cargo +stable build --release --locked
       - uses: actions/upload-artifact@v4
         with:
           name: alb-${{ runner.os }}-${{ runner.arch }}
           path: target/release/${{ matrix.binary }}
           if-no-files-found: error
+          retention-days: 3
+          compression-level: 9

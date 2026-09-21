@@ -156,8 +156,9 @@ cargo install --path . --locked
 ```
 
 Executable: `target/release/alb` on Linux/macOS, `target/release/alb.exe` on Windows.
-The native GitHub Actions matrix tests all three platforms and uploads release
-executables as workflow artifacts. Build locally for other CPU architectures.
+The manually started GitHub Actions matrix tests all three platforms and uploads
+stripped release executables as compressed workflow artifacts, retained for three
+days. Build locally for other CPU architectures.
 Synthetic audio fixtures require no encoder during tests.
 
 See PROJECT.md, STATUS.md, DECISIONS.md and NEXT.md for project context.
