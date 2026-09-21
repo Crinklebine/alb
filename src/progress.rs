@@ -34,22 +34,28 @@ impl Progress {
                     let amount = total
                         .map(|t| format!("{n}/{t} files"))
                         .unwrap_or_else(|| format!("{n} entries"));
-                    eprint!(
-                        "\r\x1b[2K{} {operation}: {amount}",
+                    // Overwrite before clearing the remaining tail so terminals
+                    // never display a deliberately blank line between frames.
+                    let line = format!(
+                        "\r{} {operation}: {amount}\x1b[K",
                         ["|", "/", "-", "\\"][frame % 4]
                     );
-                    let _ = io::stderr().flush();
+                    // Format first, then hold stderr only for this complete frame.
+                    let mut stderr = io::stderr().lock();
+                    let _ = stderr.write_all(line.as_bytes());
+                    let _ = stderr.flush();
                     frame += 1;
                 }
-                if receiver.recv_timeout(Duration::from_millis(150))
+                if receiver.recv_timeout(Duration::from_millis(250))
                     != Err(mpsc::RecvTimeoutError::Timeout)
                 {
                     break;
                 }
             }
             if terminal {
-                eprint!("\r\x1b[2K");
-                let _ = io::stderr().flush();
+                let mut stderr = io::stderr().lock();
+                let _ = stderr.write_all(b"\r\x1b[2K");
+                let _ = stderr.flush();
             } else {
                 eprintln!(
                     "{operation}: stage ended ({} processed)",
