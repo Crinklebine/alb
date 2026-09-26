@@ -17,6 +17,7 @@ pub enum PathError {
     NotDirectory(PathBuf),
     AmbiguousOutput(PathBuf),
     Overlap,
+    OverlappingInputs,
 }
 
 impl fmt::Display for PathError {
@@ -28,6 +29,10 @@ impl fmt::Display for PathError {
                 f,
                 "cannot safely resolve output '{}': parent traversal after a missing directory is unsupported",
                 path.display()
+            ),
+            Self::OverlappingInputs => write!(
+                f,
+                "input folders must be distinct and non-overlapping (including aliases)"
             ),
             Self::Overlap => write!(
                 f,
@@ -65,6 +70,30 @@ pub fn validate_input(input: &Path) -> Result<PathBuf, PathError> {
     let input = fs::canonicalize(input).map_err(|error| io_error(input, error))?;
     require_directory(&input)?;
     Ok(input)
+}
+
+/// Canonical, non-overlapping roots prevent scanning a file twice through aliases.
+pub fn validate_inputs(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, PathError> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for input in inputs {
+        let root = validate_input(input)?;
+        if roots
+            .iter()
+            .any(|other| root.starts_with(other) || other.starts_with(&root))
+        {
+            return Err(PathError::OverlappingInputs);
+        }
+        roots.push(root);
+    }
+    roots.sort();
+    Ok(roots)
+}
+
+pub fn source_root<'a>(source: &Path, inputs: &'a [PathBuf]) -> Option<&'a Path> {
+    inputs
+        .iter()
+        .find(|root| source.starts_with(root))
+        .map(PathBuf::as_path)
 }
 
 pub fn validate(input: &Path, output: &Path) -> Result<ValidatedPaths, PathError> {

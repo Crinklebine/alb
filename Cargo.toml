@@ -1,6 +1,6 @@
 [package]
 name = "alb"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-or-later"
@@ -16,6 +16,8 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 lofty = "=0.25.2"
 blake3 = "=1.8.7"
 unicode-normalization = "=0.1.25"
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+serde_json = "=1.0.151"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.5", features = ["fs"] }

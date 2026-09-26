@@ -10,6 +10,9 @@ use std::{
 };
 #[derive(Debug)]
 pub struct Track {
+    pub metadata_notes: Vec<String>,
+    pub fingerprinted: bool,
+    pub metadata_update: Option<crate::tagging::MetadataUpdate>,
     pub source_path: PathBuf,
     pub file_type: FileType,
     pub source_stamp: Option<SourceStamp>,
@@ -44,6 +47,9 @@ impl fmt::Display for Track {
 impl Track {
     pub fn empty(path: &Path) -> Self {
         Self {
+            metadata_notes: Vec::new(),
+            fingerprinted: false,
+            metadata_update: None,
             source_path: path.to_owned(),
             file_type: classify(path),
             source_stamp: None,

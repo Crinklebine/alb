@@ -45,7 +45,13 @@ impl std::error::Error for InspectionError {
 }
 
 /// Preserve every discovered file; read basic tags for all five supported types.
+#[cfg(test)]
 pub fn inspect(files: &[PathBuf]) -> TrackCatalog {
+    inspect_with_key(files, None)
+}
+
+pub fn inspect_with_key(files: &[PathBuf], key: Option<crate::acoustid::ApiKey>) -> TrackCatalog {
+    let mut lookup = key.map(crate::acoustid::AcoustId::new);
     let mut catalog = TrackCatalog::default();
     let progress = crate::progress::Progress::new("Reading metadata", Some(files.len()));
     for (index, path) in files.iter().enumerate() {
@@ -61,21 +67,78 @@ pub fn inspect(files: &[PathBuf]) -> TrackCatalog {
             catalog.tracks.push(track);
             continue;
         }
-        match inspect_known(path) {
-            Ok(track) => catalog.tracks.push(track),
+        let (mut track, safe_to_lookup) = match inspect_known(path) {
+            Ok(track) => (track, true),
             Err(error) => {
+                let safe = matches!(error, InspectionError::Parse(_));
                 catalog.errors.push((path.clone(), error.to_string()));
-                let mut track = Track::empty(path);
-                track.source_stamp = SourceStamp::at(path).ok();
-                catalog.tracks.push(track);
+                let mut track = if safe {
+                    inspect_known_mode(path, ParsingMode::BestAttempt)
+                        .or_else(|error| match error {
+                            InspectionError::Parse(_) => {
+                                inspect_known_mode(path, ParsingMode::Relaxed)
+                            }
+                            error => Err(error),
+                        })
+                        .unwrap_or_else(|_| Track::empty(path))
+                } else {
+                    Track::empty(path)
+                };
+                if track.source_stamp.is_none() {
+                    track.source_stamp = SourceStamp::at(path).ok();
+                }
+                (track, safe)
+            }
+        };
+        if lookup.is_some() && safe_to_lookup && track.source_stamp.is_some() {
+            recover_missing(
+                &mut track,
+                lookup
+                    .as_mut()
+                    .map(|l| l as &mut dyn crate::acoustid::Lookup),
+            );
+            // fpcalc reads the path independently. Reject changed source evidence.
+            if SourceStamp::at(path).ok() != track.source_stamp {
+                catalog
+                    .errors
+                    .push((path.clone(), InspectionError::SourceChanged.to_string()));
+                track = Track::empty(path);
             }
         }
+        catalog.tracks.push(track);
     }
     progress.set(files.len());
+    drop(progress);
+    if let Some(warning) = lookup.as_mut().and_then(|l| l.take_warning()) {
+        eprintln!("{warning}");
+    }
     catalog
 }
 
+fn recover_missing(track: &mut Track, lookup: Option<&mut dyn crate::acoustid::Lookup>) {
+    let missing = |value: &Option<String>| value.as_ref().is_none_or(|s| s.trim().is_empty());
+    if track.file_type == FileType::Unknown || (!missing(&track.artist) && !missing(&track.title)) {
+        return;
+    }
+    if let Some(found) = lookup.and_then(|l| l.identify(&track.source_path)) {
+        track.fingerprinted = true;
+        track.metadata_update = Some(crate::tagging::MetadataUpdate {
+            artist: missing(&track.artist).then(|| found.artist.clone()),
+            title: missing(&track.title).then(|| found.title.clone()),
+        });
+        if missing(&track.artist) {
+            track.artist = Some(found.artist);
+        }
+        if missing(&track.title) {
+            track.title = Some(found.title);
+        }
+    }
+}
+
 fn inspect_known(path: &Path) -> Result<Track, InspectionError> {
+    inspect_known_mode(path, ParsingMode::Strict)
+}
+fn inspect_known_mode(path: &Path, mode: ParsingMode) -> Result<Track, InspectionError> {
     // Recheck to avoid opening a stale symlink/special entry on a stable tree.
     // This is not race protection against concurrent filesystem replacement.
     if !fs::symlink_metadata(path)
@@ -90,7 +153,7 @@ fn inspect_known(path: &Path) -> Result<Track, InspectionError> {
     if opened != expected {
         return Err(InspectionError::SourceChanged);
     }
-    let mut track = read_metadata(path, &mut file)?;
+    let mut track = read_metadata_mode(path, &mut file, mode)?;
     let after = SourceStamp::from_file(&file).map_err(InspectionError::Io)?;
     if after != expected || SourceStamp::at(path).map_err(InspectionError::Io)? != expected {
         return Err(InspectionError::SourceChanged);
@@ -99,13 +162,24 @@ fn inspect_known(path: &Path) -> Result<Track, InspectionError> {
     Ok(track)
 }
 
+#[cfg(test)]
 fn read_metadata(
     path: &Path,
     reader: &mut (impl io::Read + io::Seek),
 ) -> Result<Track, InspectionError> {
-    let options = ParseOptions::new()
-        .read_cover_art(false)
-        .parsing_mode(ParsingMode::Strict);
+    read_metadata_mode(path, reader, ParsingMode::Strict)
+}
+fn read_metadata_mode(
+    path: &Path,
+    reader: &mut (impl io::Read + io::Seek),
+    mode: ParsingMode,
+) -> Result<Track, InspectionError> {
+    let options = ParseOptions::new().read_cover_art(false).parsing_mode(mode);
+    let isolated = if classify(path) == FileType::Mp3 {
+        mp3_blocks(reader)?
+    } else {
+        Vec::new()
+    };
     let probe = match classify(path) {
         FileType::Flac => Probe::with_file_type(reader, ReaderType::Flac),
         FileType::M4a => Probe::with_file_type(reader, ReaderType::Mp4),
@@ -122,13 +196,14 @@ fn read_metadata(
         .options(options)
         .read()
         .map_err(InspectionError::Parse)?;
-    let tags: Vec<_> = file
-        .primary_tag()
-        .into_iter()
+    let tags: Vec<_> = isolated
+        .iter()
         .chain(
-            file.tags()
-                .iter()
-                .filter(|tag| tag.tag_type() != file.primary_tag_type()),
+            file.primary_tag().into_iter().chain(
+                file.tags()
+                    .iter()
+                    .filter(|tag| tag.tag_type() != file.primary_tag_type()),
+            ),
         )
         .collect();
     let mut track = Track::empty(path);
@@ -138,6 +213,21 @@ fn read_metadata(
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| s.into_owned())
         };
+        for (field, old, new) in [
+            ("Artist", &track.artist, text(tag.artist())),
+            ("Title", &track.title, text(tag.title())),
+            ("Album", &track.album, text(tag.album())),
+        ] {
+            if let (Some(old), Some(new)) = (old, new)
+                && old != &new
+            {
+                let note =
+                    format!("Metadata conflict: {field}: retained {old:?}; alternative {new:?}");
+                if !track.metadata_notes.contains(&note) {
+                    track.metadata_notes.push(note);
+                }
+            }
+        }
         if track.title.is_none() {
             track.title = text(tag.title());
         }
@@ -162,6 +252,69 @@ fn read_metadata(
     }
     track.duration = Some(file.properties().duration());
     Ok(track)
+}
+
+// Read consecutive leading ID3 blocks separately before Lofty merges duplicate frames.
+pub(crate) fn mp3_blocks(
+    reader: &mut (impl io::Read + io::Seek),
+) -> Result<Vec<lofty::tag::Tag>, InspectionError> {
+    use io::{Cursor, Read, SeekFrom};
+    let mut tags = Vec::new();
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(InspectionError::Io)?;
+    let mut offset = 0;
+    for _ in 0..32 {
+        let mut header = [0; 10];
+        match reader.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(InspectionError::Io(e)),
+        }
+        if &header[..3] != b"ID3" || header[6..].iter().any(|b| b & 128 != 0) {
+            break;
+        }
+        let size = header[6..]
+            .iter()
+            .fold(0usize, |n, b| (n << 7) | *b as usize);
+        if size > 16 * 1024 * 1024 {
+            break;
+        }
+        let mut bytes = header.to_vec();
+        let copied = reader
+            .take(size as u64)
+            .read_to_end(&mut bytes)
+            .map_err(InspectionError::Io)?;
+        if copied != size {
+            break;
+        }
+        if let Ok(file) = Probe::with_file_type(Cursor::new(bytes), ReaderType::Mpeg)
+            .options(
+                ParseOptions::new()
+                    .read_properties(false)
+                    .read_cover_art(false)
+                    .parsing_mode(ParsingMode::Relaxed),
+            )
+            .read()
+            && let Some(tag) = file.primary_tag()
+        {
+            tags.push(tag.clone());
+        }
+        offset += 10
+            + size as u64
+            + if header[3] == 4 && header[5] & 16 != 0 {
+                10
+            } else {
+                0
+            };
+        reader
+            .seek(SeekFrom::Start(offset))
+            .map_err(InspectionError::Io)?;
+    }
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(InspectionError::Io)?;
+    Ok(tags)
 }
 
 #[cfg(test)]
@@ -191,6 +344,106 @@ mod tests {
             include_bytes!("../tests/fixtures/untagged.wav"),
         ),
     ];
+    #[test]
+    fn duplicate_id3_blocks_preserve_first_usable_fields_and_report_conflicts() {
+        fn block(fields: &[(&[u8; 4], &str)]) -> Vec<u8> {
+            let mut frames = Vec::new();
+            for (id, value) in fields {
+                frames.extend_from_slice(*id);
+                frames.extend_from_slice(&((value.len() + 1) as u32).to_be_bytes());
+                frames.extend_from_slice(&[0, 0, 0]);
+                frames.extend_from_slice(value.as_bytes());
+            }
+            frames.resize(frames.len() + 2048, 0);
+            let mut bytes = b"ID3\x03\0\0".to_vec();
+            bytes.extend(
+                (0..4)
+                    .rev()
+                    .map(|i| ((frames.len() >> (i * 7)) & 127) as u8),
+            );
+            bytes.extend(frames);
+            bytes
+        }
+        let mut bytes = block(&[(b"TPE1", "Artist"), (b"TIT2", "Song")]);
+        bytes.extend(block(&[
+            (b"TPE1", " "),
+            (b"TIT2", "Track 08"),
+            (b"TALB", "Album"),
+        ]));
+        bytes.extend_from_slice(include_bytes!("../tests/fixtures/untagged.mp3"));
+        let track = read_metadata(Path::new("song.mp3"), &mut io::Cursor::new(&bytes)).unwrap();
+        assert_eq!(track.artist.as_deref(), Some("Artist"));
+        assert_eq!(track.title.as_deref(), Some("Song"));
+        assert_eq!(track.album.as_deref(), Some("Album"));
+        assert!(
+            track
+                .metadata_notes
+                .iter()
+                .any(|n| n.contains("Track 08") && n.contains("Song"))
+        );
+        let path =
+            std::env::temp_dir().join(format!("alb-duplicate-tags-{}.mp3", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        crate::tagging::apply(
+            &mut file,
+            &crate::tagging::MetadataUpdate {
+                artist: Some("Recovered Artist".into()),
+                title: Some("Recovered Song".into()),
+            },
+            FileType::Mp3,
+        )
+        .unwrap();
+        drop(file);
+        let updated = inspect_known(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(updated.artist.as_deref(), Some("Recovered Artist"));
+        assert_eq!(updated.title.as_deref(), Some("Recovered Song"));
+    }
+
+    #[test]
+    fn malformed_year_does_not_hide_readable_identity_and_album() {
+        let mut frames = Vec::new();
+        for (id, value) in [
+            (b"TPE1", "The Band"),
+            (b"TIT2", "Song"),
+            (b"TALB", "Album"),
+            (b"TYER", "2013\x002013"),
+        ] {
+            frames.extend_from_slice(id);
+            frames.extend_from_slice(&((value.len() + 1) as u32).to_be_bytes());
+            frames.extend_from_slice(&[0, 0, 0]);
+            frames.extend_from_slice(value.as_bytes());
+        }
+        let size = frames.len();
+        let mut bytes = b"ID3\x03\0\0".to_vec();
+        bytes.extend((0..4).rev().map(|i| ((size >> (i * 7)) & 127) as u8));
+        bytes.extend(frames);
+        bytes.extend_from_slice(include_bytes!("../tests/fixtures/untagged.mp3"));
+        assert!(
+            read_metadata_mode(
+                Path::new("song.mp3"),
+                &mut io::Cursor::new(&bytes),
+                ParsingMode::BestAttempt
+            )
+            .is_err()
+        );
+        let path = std::env::temp_dir().join(format!("alb-year-{}.mp3", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let catalog = inspect(std::slice::from_ref(&path));
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(catalog.errors.len(), 1);
+        let track = &catalog.tracks[0];
+        assert_eq!(track.artist.as_deref(), Some("The Band"));
+        assert_eq!(track.title.as_deref(), Some("Song"));
+        assert_eq!(track.album.as_deref(), Some("Album"));
+        assert!(!track.fingerprinted);
+    }
+
     #[test]
     fn reads_sorting_tags_for_every_supported_format_with_extension_only_groups() {
         for &(ext, bytes, _) in OTHER_FORMATS {
@@ -322,5 +575,101 @@ mod tests {
         assert!(!text.contains('\n'));
         assert!(!text.contains('\u{1b}'));
         assert!(text.contains("\\n"));
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::acoustid::{Identification, Lookup};
+    struct Fake {
+        calls: usize,
+        succeeds: bool,
+    }
+    impl Lookup for Fake {
+        fn identify(&mut self, _: &Path) -> Option<Identification> {
+            self.calls += 1;
+            self.succeeds.then(|| Identification {
+                artist: "Recovered Artist".into(),
+                title: "Recovered Title".into(),
+            })
+        }
+    }
+    #[test]
+    fn lookup_is_optional_supported_only_and_never_triggered_by_album_or_numbers() {
+        let mut track = Track::empty(Path::new("missing.flac"));
+        recover_missing(&mut track, None);
+        assert!(track.artist.is_none() && track.title.is_none());
+        let mut fake = Fake {
+            calls: 0,
+            succeeds: true,
+        };
+        track.artist = Some("Embedded Artist".into());
+        track.title = Some("Embedded Title".into());
+        recover_missing(&mut track, Some(&mut fake));
+        assert_eq!(fake.calls, 0);
+        assert!(
+            track.album.is_none()
+                && track.album_artist.is_none()
+                && track.track_number.is_none()
+                && track.disc_number.is_none()
+        );
+        let mut unknown = Track::empty(Path::new("unknown.bin"));
+        recover_missing(&mut unknown, Some(&mut fake));
+        assert_eq!(fake.calls, 0);
+    }
+    #[test]
+    fn fills_only_missing_or_blank_artist_title_preserving_other_fields() {
+        for (artist, title) in [
+            (None, Some("Embedded Title")),
+            (Some("Embedded Artist"), None),
+            (None, None),
+            (Some(" \t"), Some("\n")),
+        ] {
+            let mut track = Track::empty(Path::new("track.m4a"));
+            track.artist = artist.map(str::to_owned);
+            track.title = title.map(str::to_owned);
+            track.album = Some("Embedded Album".into());
+            track.track_number = Some(4);
+            let mut fake = Fake {
+                calls: 0,
+                succeeds: true,
+            };
+            recover_missing(&mut track, Some(&mut fake));
+            assert_eq!(fake.calls, 1);
+            assert!(track.fingerprinted);
+            assert_eq!(
+                track.artist.as_deref(),
+                Some(
+                    artist
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or("Recovered Artist")
+                )
+            );
+            assert_eq!(
+                track.title.as_deref(),
+                Some(
+                    title
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or("Recovered Title")
+                )
+            );
+            assert_eq!(track.album.as_deref(), Some("Embedded Album"));
+            assert_eq!(track.track_number, Some(4));
+            assert!(track.album_artist.is_none() && track.disc_number.is_none());
+        }
+    }
+    #[test]
+    fn lookup_failures_preserve_existing_missing_metadata_behavior() {
+        let mut track = Track::empty(Path::new("track.ogg"));
+        track.title = Some("Embedded Title".into());
+        let mut fake = Fake {
+            calls: 0,
+            succeeds: false,
+        };
+        recover_missing(&mut track, Some(&mut fake));
+        assert!(track.artist.is_none());
+        assert!(!track.fingerprinted);
+        assert_eq!(track.title.as_deref(), Some("Embedded Title"));
     }
 }

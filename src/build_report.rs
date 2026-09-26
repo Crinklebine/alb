@@ -42,6 +42,9 @@ impl BuildReport {
             file,
             "ALB BUILD REPORT v1\nSTARTED\nPaths are escaped native debug representations.\nOnly VERIFIED records confirm completed copies; a missing COMPLETE means interruption."
         )?;
+        for root in &plan.input_roots {
+            writeln!(file, "INPUT_ROOT {root:?}")?;
+        }
         crate::plan::write_plan(&mut file, plan)?;
         for entry in &plan.entries {
             writeln!(
@@ -69,6 +72,7 @@ impl BuildReport {
     }
     pub fn verified(&mut self, entry: &PlanEntry, duplicate: bool) -> io::Result<()> {
         write_times(&mut self.file, entry)?;
+        write_output(&mut self.file, entry)?;
         writeln!(
             self.file,
             "{} source={:?} destination={:?}",
@@ -84,6 +88,7 @@ impl BuildReport {
     }
     pub fn reused(&mut self, entry: &PlanEntry) -> io::Result<()> {
         write_times(&mut self.file, entry)?;
+        write_output(&mut self.file, entry)?;
         writeln!(
             self.file,
             "VERIFIED_REUSE source={:?} destination={:?}",
@@ -121,4 +126,17 @@ fn write_times(file: &mut File, entry: &PlanEntry) -> io::Result<()> {
         crate::source::timestamp(entry.source_stamp.as_ref().map(|s| s.modified)),
         crate::source::timestamp(entry.source_stamp.as_ref().and_then(|s| s.created))
     )
+}
+
+fn write_output(file: &mut File, entry: &PlanEntry) -> io::Result<()> {
+    if let Some((hash, bytes)) = entry.output_evidence {
+        writeln!(
+            file,
+            "OUTPUT_EVIDENCE destination={:?} bytes={bytes} blake3={} metadata_update={:?}",
+            entry.destination,
+            blake3::Hash::from(hash).to_hex(),
+            entry.metadata_update
+        )?;
+    }
+    Ok(())
 }

@@ -136,6 +136,9 @@ fn same(a: &File, b: &File) -> io::Result<bool> {
 }
 impl Directory {
     pub fn absolute(path: &Path, create: bool, input: Option<&Directory>) -> io::Result<Self> {
+        Self::absolute_inputs(path, create, &input.into_iter().collect::<Vec<_>>())
+    }
+    pub fn absolute_inputs(path: &Path, create: bool, inputs: &[&Directory]) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(invalid("root must be absolute"));
         }
@@ -166,12 +169,12 @@ impl Directory {
             let Component::Normal(part) = component else {
                 return Err(invalid("noncanonical root"));
             };
-            if let Some(input) = input {
+            for input in inputs {
                 current.reject_inside(input)?;
             }
             current = current.child(part, create)?;
         }
-        if let Some(input) = input {
+        for input in inputs {
             current.reject_inside(input)?;
             input.reject_inside(&current)?;
         }
@@ -281,6 +284,19 @@ impl Directory {
                 "destination already exists",
             )),
         }
+    }
+    /// Remove only a newly created comparison partial still identified by its handle.
+    pub fn remove_partial(&self, partial: &OsStr, owned: &File) -> io::Result<()> {
+        super::component(partial)?;
+        if identity(&self.read(partial)?)? != identity(owned)? {
+            return Err(io::Error::other("comparison partial changed"));
+        }
+        let path = wide(&self.path.join(partial))?;
+        // SAFETY: terminated UTF-16 path within a pinned directory, identity checked.
+        if unsafe { DeleteFileW(path.as_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
     pub fn publish(&self, partial: &OsStr, destination: &OsStr) -> io::Result<()> {
         super::component(partial)?;

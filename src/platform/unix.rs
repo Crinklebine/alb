@@ -49,6 +49,9 @@ impl Directory {
     /// Canonical absolute roots may cross filesystems, but never symlinks.
     /// Refuse creating anything under the opened input root.
     pub fn absolute(path: &Path, create: bool, input: Option<&Directory>) -> io::Result<Self> {
+        Self::absolute_inputs(path, create, &input.into_iter().collect::<Vec<_>>())
+    }
+    pub fn absolute_inputs(path: &Path, create: bool, inputs: &[&Directory]) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(invalid("root must be absolute"));
         }
@@ -65,7 +68,7 @@ impl Directory {
             match sys::openat(&current.file, part, flags(), Mode::empty()) {
                 Ok(fd) => current = Self { file: fd.into() },
                 Err(rustix::io::Errno::NOENT) if create => {
-                    if let Some(input) = input {
+                    for input in inputs {
                         current.reject_inside(input)?;
                     }
                     current.check_alias(part)?;
@@ -81,7 +84,7 @@ impl Directory {
                 Err(e) => return Err(e.into()),
             }
         }
-        if let Some(input) = input {
+        for input in inputs {
             current.reject_inside(input)?;
             input.reject_inside(&current)?;
         }
@@ -206,6 +209,15 @@ impl Directory {
             )),
             Err(e) => Err(e.into()),
         }
+    }
+    /// Remove only a newly created comparison partial still identified by its handle.
+    pub fn remove_partial(&self, partial: &OsStr, owned: &File) -> io::Result<()> {
+        name(partial)?;
+        if super::identity(&self.read(partial)?)? != super::identity(owned)? {
+            return Err(io::Error::other("comparison partial changed"));
+        }
+        sys::unlinkat(&self.file, partial, AtFlags::empty())?;
+        self.sync()
     }
     pub fn publish(&self, partial: &OsStr, destination: &OsStr) -> io::Result<()> {
         name(partial)?;

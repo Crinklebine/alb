@@ -1,3 +1,4 @@
+mod acoustid;
 mod build_report;
 mod candidates;
 mod catalog;
@@ -16,28 +17,39 @@ mod report;
 mod safe_fs;
 mod source;
 mod space;
+mod tagging;
 
-use std::{env, path::Path, process::ExitCode};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 fn scan(
-    input: &Path,
+    inputs: &[PathBuf],
     verbose: bool,
     hash: bool,
     plan_output: Option<&Path>,
     execute: bool,
     resume: bool,
+    acoustid_key: Option<acoustid::ApiKey>,
 ) -> ExitCode {
-    let catalog = match discovery::discover(input) {
-        Ok(catalog) => catalog,
-        Err(error) => {
-            eprintln!(
-                "error: cannot scan {:?}: {:?}",
-                error.path,
-                error.source.to_string()
-            );
-            return ExitCode::from(1);
-        }
-    };
+    let mut catalog = discovery::Catalog::default();
+    for input in inputs {
+        let found = match discovery::discover(input) {
+            Ok(found) => found,
+            Err(error) => {
+                eprintln!("error: cannot scan {:?}: {}", error.path, error.source);
+                return ExitCode::from(1);
+            }
+        };
+        catalog.files.extend(found.files);
+        catalog.directories += found.directories;
+        catalog.skipped_symlinks += found.skipped_symlinks;
+        catalog.skipped_special += found.skipped_special;
+        catalog.errors.extend(found.errors);
+    }
+    catalog.files.sort();
     eprintln!(
         "Discovery: {} regular files, {} directories (including root), {} symlinks skipped, {} special entries skipped, {} errors.",
         catalog.files.len(),
@@ -56,7 +68,7 @@ fn scan(
         candidate_count,
         catalog.files.len() - candidate_count
     );
-    let inspected = inspection::inspect(&catalog.files);
+    let inspected = inspection::inspect_with_key(&catalog.files, acoustid_key);
     eprintln!(
         "Catalog: {} files, {} metadata/read errors.",
         inspected.tracks.len(),
@@ -65,9 +77,9 @@ fn scan(
     let hashes = (hash || plan_output.is_some()).then(|| hashing::analyze(&inspected.tracks));
     if let Some(output) = plan_output {
         let planning = progress::Progress::new("Planning destinations", Some(catalog.files.len()));
-        let mut plan = plan::generate(&catalog, &inspected, input, output, hashes.as_ref());
+        let mut plan = plan::generate_many(&catalog, &inspected, inputs, output, hashes.as_ref());
         plan::check_existing_output_mode(&mut plan, resume);
-        problems::route(&mut plan, output);
+        problems::route(&mut plan, &inputs[0], output);
         planning.set(catalog.files.len());
         drop(planning);
         let space_result = space::check(&plan, output, resume);
@@ -116,7 +128,7 @@ fn scan(
                 ExitCode::from(1)
             };
         }
-        match execution::execute_resilient(&plan, input, output, resume) {
+        match execution::execute_resilient(&plan, &inputs[0], output, resume) {
             Ok(result) => {
                 eprintln!(
                     "Build processing finished: {} verified copies, {} exact duplicates retained through their representatives; {} verified existing files reused.",
@@ -183,32 +195,52 @@ fn main() -> ExitCode {
         Ok(cli::Command::BuildHelp) => println!("{}", cli::BUILD_HELP),
         Ok(cli::Command::ScanHelp) => println!("{}", cli::SCAN_HELP),
         Ok(cli::Command::Scan(args)) => {
-            let input = match paths::validate_input(&args.input) {
+            let input = match paths::validate_inputs(&args.input) {
                 Ok(input) => input,
                 Err(error) => {
                     eprintln!("error: {error}");
                     return ExitCode::from(1);
                 }
             };
-            return scan(&input, args.verbose, args.hash, None, false, false);
+            return scan(
+                &input,
+                args.verbose,
+                args.hash,
+                None,
+                false,
+                false,
+                args.acoustid_key,
+            );
         }
         Ok(cli::Command::Build(paths)) => {
+            let acoustid_key = paths.acoustid_key;
             let dry_run = paths.dry_run;
             let resume = paths.resume;
-            let paths = match paths::validate(&paths.input, &paths.output) {
-                Ok(paths) => paths,
+            let inputs = match paths::validate_inputs(&paths.input) {
+                Ok(inputs) => inputs,
                 Err(error) => {
                     eprintln!("error: {error}");
                     return ExitCode::from(1);
                 }
             };
+            let mut output = paths.output;
+            for input in &inputs {
+                match paths::validate(input, &output) {
+                    Ok(roots) => output = roots.output,
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return ExitCode::from(1);
+                    }
+                }
+            }
             return scan(
-                &paths.input,
+                &inputs,
                 false,
                 false,
-                Some(paths.output.as_path()),
+                Some(output.as_path()),
                 !dry_run,
                 resume,
+                acoustid_key,
             );
         }
         Err(error) => {

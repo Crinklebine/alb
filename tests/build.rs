@@ -331,10 +331,11 @@ fn malformed_and_missing_metadata_get_sidecars_while_good_files_build() {
 #[test]
 fn per_file_output_failure_does_not_stop_other_files() {
     let f = Fixture::new();
-    fs::write(f.0.join("in/a.txt"), b"first").unwrap();
+    fs::create_dir_all(f.0.join("in/Band/Album")).unwrap();
+    fs::write(f.0.join("in/Band/Album/a.txt"), b"first").unwrap();
     fs::write(f.0.join("in/b.txt"), b"second").unwrap();
-    fs::create_dir_all(f.0.join("out/UNKNOWN")).unwrap();
-    fs::write(f.0.join("out/UNKNOWN/a.txt"), b"existing").unwrap();
+    fs::create_dir_all(f.0.join("out/UNKNOWN/Band/Album")).unwrap();
+    fs::write(f.0.join("out/UNKNOWN/Band/Album/a.txt"), b"existing").unwrap();
     // Make only this problem class unavailable; source is never overwritten.
     fs::create_dir_all(f.0.join("out/Problem Files")).unwrap();
     fs::write(
@@ -350,10 +351,22 @@ fn per_file_output_failure_does_not_stop_other_files() {
     );
     assert_eq!(fs::read(f.0.join("out/UNKNOWN/b.txt")).unwrap(), b"second");
     assert_eq!(
-        fs::read(f.0.join("out/UNKNOWN/a.txt")).unwrap(),
+        fs::read(f.0.join("out/UNKNOWN/Band/Album/a.txt")).unwrap(),
         b"existing"
     );
-    assert!(f.0.join("out/Problem Files/Copy Errors").is_dir());
+    let folder = f.0.join("out/Problem Files/Copy Errors/Band/Album");
+    let files: Vec<_> = fs::read_dir(folder)
+        .unwrap()
+        .map(|p| p.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().any(|p| fs::read(p).unwrap() == b"first"));
+    assert!(
+        files
+            .iter()
+            .any(|p| fs::read_to_string(p).unwrap().contains("ALB problem file"))
+    );
+    assert_eq!(fs::read(f.0.join("in/Band/Album/a.txt")).unwrap(), b"first");
 }
 
 #[test]
@@ -505,4 +518,109 @@ fn windows_junctions_are_skipped_and_never_receive_output() {
     // Remove the junction entries themselves before fixture cleanup.
     fs::remove_dir(source_link).unwrap();
     fs::remove_dir(output_link).unwrap();
+}
+
+#[test]
+fn missing_metadata_preserves_nested_source_folders_and_sidecars_on_resume() {
+    let f = Fixture::new();
+    for folder in ["Band/Album A", "Band/Album B"] {
+        let source = f.0.join("in").join(folder);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("song.wav"),
+            include_bytes!("fixtures/untagged.wav"),
+        )
+        .unwrap();
+    }
+    let result = f.run();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    for (folder, class) in [
+        ("Band/Album A", "Missing Metadata"),
+        ("Band/Album B", "Duplicate Problems"),
+    ] {
+        let directory = f.0.join("out/Problem Files").join(class).join(folder);
+        let files: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 2);
+        let copied = files
+            .iter()
+            .find(|p| p.extension().is_some_and(|e| e == "wav"))
+            .unwrap();
+        assert_eq!(
+            fs::read(copied).unwrap(),
+            include_bytes!("fixtures/untagged.wav")
+        );
+        assert!(
+            files
+                .iter()
+                .any(|p| p.extension().is_some_and(|e| e == "txt"))
+        );
+        assert_eq!(
+            fs::read(f.0.join("in").join(folder).join("song.wav")).unwrap(),
+            include_bytes!("fixtures/untagged.wav")
+        );
+    }
+    assert!(resume(&f, false).status.success());
+}
+
+#[test]
+fn parentheses_and_long_generated_problem_names_keep_source_folders() {
+    let f = Fixture::new();
+    for (folder, extension, bytes) in [
+        (
+            "Clash",
+            "wav",
+            include_bytes!("fixtures/untagged.wav").as_slice(),
+        ),
+        (
+            "Clash (Live)",
+            "m4a",
+            include_bytes!("fixtures/untagged.m4a").as_slice(),
+        ),
+    ] {
+        let directory =
+            f.0.join("in")
+                .join(folder)
+                .join("A fairly long original album folder name");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join(format!("{}.{}", "long song name ".repeat(6), extension)),
+            bytes,
+        )
+        .unwrap();
+    }
+    let result = f.run();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let root = f.0.join("out/Problem Files/Missing Metadata");
+    assert!(
+        fs::read_dir(&root)
+            .unwrap()
+            .all(|p| p.unwrap().path().is_dir())
+    );
+    for folder in ["Clash", "Clash (Live)"] {
+        let directory = root
+            .join(folder)
+            .join("A fairly long original album folder name");
+        let files: Vec<_> = fs::read_dir(directory)
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 2);
+        assert!(
+            files
+                .iter()
+                .any(|p| p.extension().is_some_and(|e| e == "txt"))
+        );
+    }
+    assert!(resume(&f, false).status.success());
 }

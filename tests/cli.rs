@@ -58,7 +58,7 @@ fn build_help_explains_required_options_and_limitations() {
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
         let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("--input SOURCE --output DESTINATION"));
+        assert!(stdout.contains("--input SOURCE [--input SOURCE ...] --output DESTINATION"));
         assert!(stdout.contains("never overwrites destinations"));
     }
 }
@@ -76,10 +76,6 @@ fn malformed_build_arguments_are_usage_errors() {
         (
             vec!["--input", "source", "--output", ""],
             "--output requires",
-        ),
-        (
-            vec!["--input", "a", "--input", "b"],
-            "--input was supplied more than once",
         ),
         (
             vec!["--output", "a", "--output", "b"],
@@ -177,7 +173,6 @@ fn scan_help_and_argument_errors() {
         vec!["scan"],
         vec!["scan", "--input"],
         vec!["scan", "--input", ""],
-        vec!["scan", "--input", "a", "--input", "b"],
         vec!["scan", "--input", "a", "--verbose", "--verbose"],
         vec!["scan", "--input", "a", "--output", "b"],
         vec!["scan", "--input", "--verbose"],

@@ -5,7 +5,9 @@ use crate::{
     safe_fs::Directory,
     source::SourceStamp,
 };
-use std::{collections::BTreeSet, ffi::OsString, fs::File, io, path::Path};
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::{ffi::OsString, fs::File, io, path::Path};
 
 #[derive(Debug, Default)]
 pub struct BuildResult {
@@ -191,8 +193,64 @@ pub fn execute(
     Ok(result)
 }
 
+// Only quarantine copies choose an alternative name on a real destination collision.
+fn copy_problem_aware(
+    entry: &mut PlanEntry,
+    input: &Directory,
+    input_root: &Path,
+    output: &Directory,
+    output_root: &Path,
+    resume: bool,
+) -> io::Result<bool> {
+    let original = entry.destination.clone();
+    for attempt in 0..100 {
+        if resume && entry.metadata_update.is_none() && !crate::problems::reasons(entry).is_empty()
+        {
+            let destination = entry
+                .destination
+                .as_ref()
+                .ok_or_else(|| invalid("missing destination"))?;
+            let relative = destination
+                .strip_prefix(output_root)
+                .map_err(|_| invalid("destination outside output"))?;
+            let (parent, name) = output.parent(relative, true)?;
+            match parent.read(&name) {
+                Ok(mut file) => {
+                    parent.check_alias(&name)?;
+                    SourceStamp::from_file(&file)?;
+                    let evidence = hashing::hash_reader(&mut file)?;
+                    if evidence != (digest(entry)?, stamp(entry)?.len) {
+                        entry.destination = original.as_ref().map(|path| {
+                            crate::problems::collision_destination(path, &entry.source, attempt)
+                        });
+                        continue;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let result = copy_one(entry, input, input_root, output, output_root, resume);
+        match result {
+            Err(ref error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && !crate::problems::reasons(entry).is_empty() =>
+            {
+                entry.destination = original.as_ref().map(|path| {
+                    crate::problems::collision_destination(path, &entry.source, attempt)
+                });
+            }
+            _ => return result,
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "problem filename collision limit reached",
+    ))
+}
+
 fn copy_one(
-    entry: &PlanEntry,
+    entry: &mut PlanEntry,
     input: &Directory,
     input_root: &Path,
     output: &Directory,
@@ -207,6 +265,7 @@ fn copy_one(
         .strip_prefix(output_root)
         .map_err(|_| invalid("destination outside output"))?;
     let (parent, name) = output.parent(relative, true)?;
+    let mut reuse_tagged = false;
     if resume {
         match parent.read(&name) {
             Ok(file) => {
@@ -216,17 +275,24 @@ fn copy_one(
                     stamp(entry)?.modified,
                     stamp(entry)?.created,
                 )?;
-                verify_file(file, digest(entry)?, stamp(entry)?.len)?;
-                let source = open_source(input, input_root, entry)?;
-                verify_file(source, digest(entry)?, stamp(entry)?.len)?;
-                open_source(input, input_root, entry)?;
-                return Ok(true);
+                if entry.metadata_update.is_some() {
+                    reuse_tagged = true;
+                } else {
+                    verify_file(file, digest(entry)?, stamp(entry)?.len)?;
+                    let source = open_source(input, input_root, entry)?;
+                    verify_file(source, digest(entry)?, stamp(entry)?.len)?;
+                    open_source(input, input_root, entry)?;
+                    entry.output_evidence = Some((digest(entry)?, stamp(entry)?.len));
+                    return Ok(true);
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
     }
-    parent.absent(&name)?;
+    if !reuse_tagged {
+        parent.absent(&name)?;
+    }
     let mut source = open_source(input, input_root, entry)?;
     crate::space::ensure(
         crate::space::required(stamp(entry)?.len, 1)?,
@@ -247,13 +313,31 @@ fn copy_one(
         }
     };
     copying::transfer_verified(&mut source, &mut partial, stamp(entry)?, digest(entry)?)?;
+    if let Some(update) = &entry.metadata_update {
+        crate::tagging::apply(&mut partial, update, entry.file_type)?;
+        crate::platform::set_times(&partial, stamp(entry)?.modified, stamp(entry)?.created)?;
+    }
+    use std::io::Seek;
+    partial.rewind()?;
+    let final_evidence = if entry.metadata_update.is_some() {
+        hashing::hash_reader(&mut partial)?
+    } else {
+        (digest(entry)?, stamp(entry)?.len)
+    };
     open_source(input, input_root, entry)?; // Also confirm the path still identifies this source.
     let partial_stamp = SourceStamp::from_file(&partial)?;
     if SourceStamp::from_file(&parent.read(&partial_name)?)? != partial_stamp {
         return Err(io::Error::other("partial path changed before publication"));
     }
+    if reuse_tagged {
+        verify_file(parent.read(&name)?, final_evidence.0, final_evidence.1)?;
+        parent.remove_partial(&partial_name, &partial)?;
+        entry.output_evidence = Some(final_evidence);
+        return Ok(true);
+    }
     parent.publish(&partial_name, &name)?;
-    verify_file(parent.read(&name)?, digest(entry)?, stamp(entry)?.len)?;
+    verify_file(parent.read(&name)?, final_evidence.0, final_evidence.1)?;
+    entry.output_evidence = Some(final_evidence);
     Ok(false)
 }
 
@@ -317,14 +401,35 @@ pub fn execute_resilient(
     if !plan.output_checked {
         return Err(invalid("output safety check missing"));
     }
-    let roots = paths::validate(input_root, output_root).map_err(|e| invalid(&e.to_string()))?;
-    let input = Directory::absolute(&roots.input, false, None)?;
+    let requested = if plan.input_roots.is_empty() {
+        vec![input_root.to_path_buf()]
+    } else {
+        plan.input_roots.clone()
+    };
+    let validated = paths::validate_inputs(&requested).map_err(|e| invalid(&e.to_string()))?;
+    let mut sources = Vec::new();
+    let mut resolved_output = None;
+    for root in validated {
+        let roots = paths::validate(&root, output_root).map_err(|e| invalid(&e.to_string()))?;
+        let input = Directory::absolute(&roots.input, false, None)?;
+        resolved_output = Some(roots.output.clone());
+        sources.push((roots.input, input));
+    }
+    let roots = paths::ValidatedPaths {
+        input: sources
+            .first()
+            .ok_or_else(|| invalid("missing input roots"))?
+            .0
+            .clone(),
+        output: resolved_output.ok_or_else(|| invalid("missing output root"))?,
+    };
     crate::space::check(plan, &roots.output, resume)?;
-    let output = Directory::absolute(&roots.output, true, Some(&input))?;
+    let input_handles: Vec<_> = sources.iter().map(|(_, directory)| directory).collect();
+    let output = Directory::absolute_inputs(&roots.output, true, &input_handles)?;
     output.lock()?;
     let mut report = crate::build_report::BuildReport::start(&output, plan)?;
     let mut result = BuildResult::default();
-    let mut published = BTreeSet::new();
+    let mut published = std::collections::BTreeMap::new();
     let progress =
         crate::progress::Progress::new("Copying and verifying", Some(plan.entries.len()));
     let ordered = plan
@@ -337,15 +442,23 @@ pub fn execute_resilient(
                 .filter(|e| matches!(e.action, Action::DuplicateOf(_))),
         );
     for (index, original) in ordered.enumerate() {
+        let (source_root, input) = sources
+            .iter()
+            .find(|(root, _)| original.source.starts_with(root))
+            .ok_or_else(|| invalid("source outside supplied inputs"))?;
+        let roots = paths::ValidatedPaths {
+            input: source_root.clone(),
+            output: roots.output.clone(),
+        };
         progress.set(index);
         let mut entry = original.clone();
         let mut duplicate = false;
         let operation = (|| -> io::Result<bool> {
             if let Action::DuplicateOf(representative) = &entry.action {
-                if !published.contains(representative) {
+                if !published.contains_key(representative) {
                     return Err(invalid("duplicate representative unavailable"));
                 }
-                let source = open_source(&input, &roots.input, &entry)?;
+                let source = open_source(input, &roots.input, &entry)?;
                 verify_file(source, digest(&entry)?, stamp(&entry)?.len)?;
                 let destination = entry
                     .destination
@@ -357,21 +470,39 @@ pub fn execute_resilient(
                         .map_err(|_| invalid("destination outside output"))?,
                     false,
                 )?;
-                verify_file(parent.read(&name)?, digest(&entry)?, stamp(&entry)?.len)?;
-                open_source(&input, &roots.input, &entry)?;
+                let evidence: ([u8; 32], u64) = published[representative];
+                verify_file(parent.read(&name)?, evidence.0, evidence.1)?;
+                entry.output_evidence = Some(evidence);
+                open_source(input, &roots.input, &entry)?;
                 duplicate = true;
                 return Ok(false);
             }
-            copy_one(&entry, &input, &roots.input, &output, &roots.output, resume)
+            copy_problem_aware(
+                &mut entry,
+                input,
+                &roots.input,
+                &output,
+                &roots.output,
+                resume,
+            )
         })();
         let operation = match operation {
             Ok(reused) => Ok(reused),
             Err(error) => {
                 duplicate = false;
+                let tagging_failed = error.to_string().starts_with("metadata update failed:");
+                if tagging_failed {
+                    entry.metadata_update = None;
+                }
                 crate::problems::mark(
                     &mut entry,
+                    &roots.input,
                     &roots.output,
-                    "Copy Errors",
+                    if tagging_failed {
+                        "Metadata Write Errors"
+                    } else {
+                        "Copy Errors"
+                    },
                     vec![format!("Copy or verification failed: {error}")],
                 );
                 // A previous inspection/hash read may have failed transiently.
@@ -391,7 +522,7 @@ pub fn execute_resilient(
                         }
                         entry.source_stamp = Some(before);
                         entry.digest = Some(hash);
-                        open_source(&input, &roots.input, &entry)?;
+                        open_source(input, &roots.input, &entry)?;
                         Ok(())
                     })();
                     if let Err(error) = refreshed {
@@ -401,7 +532,41 @@ pub fn execute_resilient(
                     }
                 }
                 // Retry independently in quarantine; never overwrite the conflicting destination.
-                copy_one(&entry, &input, &roots.input, &output, &roots.output, resume)
+                copy_problem_aware(
+                    &mut entry,
+                    input,
+                    &roots.input,
+                    &output,
+                    &roots.output,
+                    resume,
+                )
+                .or_else(|error| {
+                    // A first failure may have been a destination conflict; tagging
+                    // can then fail during quarantine retry. Still preserve the bytes.
+                    if entry.metadata_update.is_none()
+                        || !error.to_string().starts_with("metadata update failed:")
+                    {
+                        return Err(error);
+                    }
+                    entry.metadata_update = None;
+                    crate::problems::mark(
+                        &mut entry,
+                        &roots.input,
+                        &roots.output,
+                        "Metadata Write Errors",
+                        vec![format!(
+                            "{error}; original bytes retained without metadata changes"
+                        )],
+                    );
+                    copy_problem_aware(
+                        &mut entry,
+                        input,
+                        &roots.input,
+                        &output,
+                        &roots.output,
+                        resume,
+                    )
+                })
             }
         };
         let is_problem = !crate::problems::reasons(&entry).is_empty();
@@ -436,7 +601,12 @@ pub fn execute_resilient(
                     report.verified(&entry, false)?;
                 }
                 if !is_problem {
-                    published.insert(entry.source.clone());
+                    published.insert(
+                        entry.source.clone(),
+                        entry
+                            .output_evidence
+                            .ok_or_else(|| invalid("missing output evidence"))?,
+                    );
                 }
             }
             Err(error) => {
@@ -455,6 +625,9 @@ pub fn execute_resilient(
         result.failed += 1;
         // Discovery errors may refer to inaccessible directories rather than files.
         let mut entry = PlanEntry {
+            metadata_update: None,
+            output_evidence: None,
+            fingerprint_root: None,
             source: input_root.to_path_buf(),
             file_type: crate::candidates::FileType::Unknown,
             source_stamp: None,
@@ -539,6 +712,77 @@ mod tests {
     }
 
     #[test]
+    fn problem_names_are_preserved_and_existing_collisions_are_not_overwritten() {
+        let f = Fixture::new();
+        f.write("broken.mp3", b"unreadable metadata");
+        let mut plan = f.plan();
+        crate::problems::route(&mut plan, &f.0.join("in"), &f.0.join("out"));
+        let destination = plan.entries[0].destination.clone().unwrap();
+        assert_eq!(destination.file_name().unwrap(), "broken.mp3");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"existing unrelated file").unwrap();
+        let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), false).unwrap();
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.copied, 1);
+        assert_eq!(fs::read(&destination).unwrap(), b"existing unrelated file");
+        let alternate =
+            crate::problems::collision_destination(&destination, &plan.entries[0].source, 0);
+        assert_eq!(fs::read(&alternate).unwrap(), b"unreadable metadata");
+        let resumed = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), true).unwrap();
+        assert_eq!(resumed.failed, 0);
+        assert_eq!(resumed.reused, 1);
+        assert!(
+            alternate
+                .with_file_name(format!(
+                    "{}.txt",
+                    alternate.file_name().unwrap().to_str().unwrap()
+                ))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn repaired_output_resolves_pending_parse_error_in_audit() {
+        let f = Fixture::new();
+        f.write("song.flac", include_bytes!("../tests/fixtures/tone.flac"));
+        let files = crate::discovery::discover(&f.0.join("in")).unwrap();
+        let mut tracks = crate::inspection::inspect(&files.files);
+        let track = &mut tracks.tracks[0];
+        track.fingerprinted = true;
+        track.metadata_update = Some(crate::tagging::MetadataUpdate {
+            artist: Some("Recovered Artist".into()),
+            title: Some("Recovered Title".into()),
+        });
+        track.artist = Some("Recovered Artist".into());
+        track.title = Some("Recovered Title".into());
+        // Model a recovered inspection error; actual output must still pass strict parsing.
+        tracks.errors.push((
+            track.source_path.clone(),
+            "metadata parse failed: recoverable tag error".into(),
+        ));
+        let hashes = crate::hashing::analyze(&tracks.tracks);
+        let mut plan = crate::plan::generate(
+            &files,
+            &tracks,
+            &f.0.join("in"),
+            &f.0.join("out"),
+            Some(&hashes),
+        );
+        crate::problems::route(&mut plan, &f.0.join("in"), &f.0.join("out"));
+        crate::plan::check_existing_output_mode(&mut plan, false);
+        assert!(crate::problems::reasons(&plan.entries[0]).is_empty());
+        let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), false).unwrap();
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.problems, 0);
+        assert!(!f.0.join("out/Problem Files").exists());
+        let audit = fs::read_dir(f.0.join("out/_ALB"))
+            .unwrap()
+            .map(|p| fs::read_to_string(p.unwrap().path()).unwrap())
+            .collect::<String>();
+        assert!(audit.contains("Metadata warning:"));
+    }
+
+    #[test]
     fn insufficient_space_fails_before_output_creation() {
         let f = Fixture::new();
         f.write("a.txt", b"sample");
@@ -553,12 +797,165 @@ mod tests {
     }
 
     #[test]
+    fn failed_tagging_preserves_original_bytes_in_problem_folder() {
+        let f = Fixture::new();
+        f.write("broken.mp3", b"not decodable audio");
+        let mut plan = f.plan();
+        for entry in &mut plan.entries {
+            entry.metadata_update = Some(crate::tagging::MetadataUpdate {
+                artist: Some("Artist".into()),
+                title: Some("Title".into()),
+            });
+        }
+        crate::problems::route(&mut plan, &f.0.join("in"), &f.0.join("out"));
+        let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), false).unwrap();
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.copied, 1);
+        let copied = fs::read_dir(f.0.join("out/Problem Files/Metadata Write Errors"))
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .find(|p| p.extension().is_some_and(|e| e == "mp3"))
+            .unwrap();
+        assert_eq!(fs::read(copied).unwrap(), b"not decodable audio");
+        assert_eq!(
+            fs::read(f.0.join("in/broken.mp3")).unwrap(),
+            b"not decodable audio"
+        );
+    }
+
+    #[test]
+    fn recovered_metadata_is_written_for_all_formats_and_resume_and_dedupe_work() {
+        use lofty::{
+            config::WriteOptions,
+            file::TaggedFileExt,
+            probe::Probe,
+            tag::{Accessor, TagExt},
+        };
+        use std::io::Seek;
+        let f = Fixture::new();
+        for (extension, bytes) in [
+            (
+                "flac",
+                include_bytes!("../tests/fixtures/tone.flac").as_slice(),
+            ),
+            (
+                "m4a",
+                include_bytes!("../tests/fixtures/tone.m4a").as_slice(),
+            ),
+            (
+                "mp3",
+                include_bytes!("../tests/fixtures/tone.mp3").as_slice(),
+            ),
+            (
+                "ogg",
+                include_bytes!("../tests/fixtures/tone.ogg").as_slice(),
+            ),
+            (
+                "wav",
+                include_bytes!("../tests/fixtures/tone.wav").as_slice(),
+            ),
+        ] {
+            let path = f.0.join("in").join(format!("a.{extension}"));
+            fs::write(&path, bytes).unwrap();
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let tagged = Probe::new(&mut file)
+                .guess_file_type()
+                .unwrap()
+                .read()
+                .unwrap();
+            for tag in tagged.tags() {
+                let mut tag = tag.clone();
+                tag.remove_artist();
+                tag.remove_title();
+                file.rewind().unwrap();
+                tag.save_to(&mut file, WriteOptions::new()).unwrap();
+            }
+            drop(file);
+            fs::copy(&path, f.0.join("in").join(format!("b.{extension}"))).unwrap();
+        }
+        let sources: Vec<_> = fs::read_dir(f.0.join("in"))
+            .unwrap()
+            .map(|p| {
+                let path = p.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let files = crate::discovery::discover(&f.0.join("in")).unwrap();
+        let mut tracks = crate::inspection::inspect(&files.files);
+        for track in &mut tracks.tracks {
+            assert!(track.artist.is_none() && track.title.is_none());
+            track.artist = Some("Recovered Artist".into());
+            track.title = Some("Recovered Title".into());
+            track.fingerprinted = true;
+            track.metadata_update = Some(crate::tagging::MetadataUpdate {
+                artist: track.artist.clone(),
+                title: track.title.clone(),
+            });
+        }
+        let hashes = crate::hashing::analyze(&tracks.tracks);
+        let mut plan = crate::plan::generate(
+            &files,
+            &tracks,
+            &f.0.join("in"),
+            &f.0.join("out"),
+            Some(&hashes),
+        );
+        crate::plan::check_existing_output_mode(&mut plan, false);
+        crate::problems::route(&mut plan, &f.0.join("in"), &f.0.join("out"));
+        let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), false).unwrap();
+        let audit = fs::read_dir(f.0.join("out/_ALB"))
+            .unwrap()
+            .map(|p| fs::read_to_string(p.unwrap().path()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(result.failed, 0, "{audit}");
+        assert_eq!(result.copied, 5);
+        assert_eq!(result.duplicates, 5);
+        for entry in &plan.entries {
+            let tagged = Probe::open(entry.destination.as_ref().unwrap())
+                .unwrap()
+                .read()
+                .unwrap();
+            let tag = if tagged.file_type() == lofty::file::FileType::Wav {
+                tagged.tag(lofty::tag::TagType::RiffInfo).unwrap()
+            } else {
+                tagged.primary_tag().unwrap()
+            };
+            assert_eq!(tag.artist().as_deref(), Some("Recovered Artist"));
+            assert_eq!(tag.title().as_deref(), Some("Recovered Title"));
+            assert_eq!(tag.album().as_deref(), Some("Test Album"));
+        }
+        crate::plan::check_existing_output_mode(&mut plan, true);
+        let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), true).unwrap();
+        assert_eq!(result.failed, 0);
+        assert_eq!(
+            result.reused,
+            5,
+            "{}",
+            fs::read_dir(f.0.join("out/_ALB"))
+                .unwrap()
+                .map(|p| fs::read_to_string(p.unwrap().path()).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(result.duplicates, 5);
+        for (path, bytes) in sources {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn vanished_source_gets_explanation_and_other_files_continue() {
         let f = Fixture::new();
         f.write("a.txt", b"gone");
         f.write("b.txt", b"keep");
         let mut plan = f.plan();
-        crate::problems::route(&mut plan, &f.0.join("out"));
+        crate::problems::route(&mut plan, &f.0.join("in"), &f.0.join("out"));
         fs::remove_file(f.0.join("in/a.txt")).unwrap();
         let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), false).unwrap();
         assert_eq!(result.failed, 1);

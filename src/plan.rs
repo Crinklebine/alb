@@ -24,6 +24,9 @@ pub enum Action {
 
 #[derive(Debug, Clone)]
 pub struct PlanEntry {
+    pub metadata_update: Option<crate::tagging::MetadataUpdate>,
+    pub output_evidence: Option<([u8; 32], u64)>,
+    pub fingerprint_root: Option<PathBuf>,
     pub source: PathBuf,
     pub file_type: FileType,
     pub source_stamp: Option<SourceStamp>,
@@ -38,6 +41,7 @@ pub struct PlanEntry {
 
 #[derive(Debug, Default)]
 pub struct BuildPlan {
+    pub input_roots: Vec<PathBuf>,
     pub entries: Vec<PlanEntry>,
     pub discovery_errors: Vec<String>,
     pub output_checked: bool,
@@ -130,12 +134,83 @@ fn destination(track: &Track, output: &Path) -> Result<(PathBuf, String, bool), 
     Ok((full, key, changed))
 }
 
+fn nested_fingerprint_path(
+    source: &Path,
+    input: &Path,
+    root: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<PathBuf, String> {
+    let relative = source
+        .strip_prefix(input)
+        .map_err(|_| "source outside input root")?;
+    let mut path = root.to_owned();
+    for component in relative
+        .parent()
+        .ok_or("missing source parent")?
+        .components()
+    {
+        let std::path::Component::Normal(name) = component else {
+            return Err("unsafe relative source path".into());
+        };
+        path.push(
+            sanitize_component(&name.to_string_lossy())
+                .map_err(|e| e.to_string())?
+                .as_str(),
+        );
+    }
+    path.push(name);
+    if path.as_os_str().as_encoded_bytes().len() > 240 {
+        return Err("proposed full path exceeds the conservative 240-byte budget".into());
+    }
+    Ok(path)
+}
+fn fingerprint_destination(
+    track: &Track,
+    input: &Path,
+    output: &Path,
+    root: &Path,
+) -> Result<(PathBuf, String, bool), String> {
+    use unicode_normalization::UnicodeNormalization;
+    let (normal, _, changed) = destination(track, Path::new(""))?;
+    let path = nested_fingerprint_path(
+        &track.source_path,
+        input,
+        root,
+        normal.file_name().ok_or("missing filename")?,
+    )?;
+    let key = path
+        .strip_prefix(output)
+        .map_err(|_| "destination outside output")?
+        .to_string_lossy()
+        .to_lowercase()
+        .nfc()
+        .collect();
+    Ok((path, key, changed))
+}
+
 /// Preserve every discovered file, including unknowns and inspection failures.
 /// Hash evidence enables advisory dedupe before destination collision checks.
+#[cfg(test)]
 pub fn generate(
     discovery: &Catalog,
     inspection: &TrackCatalog,
     input: &Path,
+    output: &Path,
+    hashes: Option<&HashCatalog>,
+) -> BuildPlan {
+    generate_many(
+        discovery,
+        inspection,
+        &[input.to_path_buf()],
+        output,
+        hashes,
+    )
+}
+
+pub fn generate_many(
+    discovery: &Catalog,
+    inspection: &TrackCatalog,
+    inputs: &[PathBuf],
     output: &Path,
     hashes: Option<&HashCatalog>,
 ) -> BuildPlan {
@@ -150,6 +225,7 @@ pub fn generate(
         .map(|(path, error)| (path, error))
         .collect();
     let mut plan = BuildPlan {
+        input_roots: inputs.to_vec(),
         metadata_warnings: inspection.errors.len(),
         ..BuildPlan::default()
     };
@@ -158,7 +234,11 @@ pub fn generate(
     let mut files = discovery.files.clone();
     files.sort();
     for source in files {
+        let input = crate::paths::source_root(&source, inputs).unwrap_or(Path::new(""));
         let mut entry = PlanEntry {
+            metadata_update: tracks.get(&source).and_then(|t| t.metadata_update.clone()),
+            output_evidence: None,
+            fingerprint_root: None,
             source: source.clone(),
             file_type: classify(&source),
             source_stamp: tracks.get(&source).and_then(|t| t.source_stamp.clone()),
@@ -168,13 +248,37 @@ pub fn generate(
             destination: None,
             issues: Vec::new(),
             sanitized: false,
-            notes: Vec::new(),
+            notes: tracks
+                .get(&source)
+                .map(|t| t.metadata_notes.clone())
+                .unwrap_or_default(),
         };
+        let identified = tracks.get(&source).is_some_and(|t| t.fingerprinted);
+        if identified {
+            entry.fingerprint_root = tracks
+                .get(&source)
+                .and_then(|t| required(t.artist.as_deref(), "artist").ok())
+                .and_then(|a| sanitize_component(a).ok())
+                .map(|a| {
+                    output
+                        .join(entry.file_type.group())
+                        .join(a.as_str())
+                        .join("Fingerprinted")
+                });
+            entry
+                .notes
+                .push("AcoustID: missing Artist/Title recovered by fingerprint lookup".into());
+        }
         if let Some(track) = tracks.get(&source)
             && track.file_type != FileType::Unknown
             && (track.artist.is_some() || track.album.is_some() || track.title.is_some())
         {
-            match destination(track, output) {
+            let proposed = if let Some(root) = &entry.fingerprint_root {
+                fingerprint_destination(track, input, output, root)
+            } else {
+                destination(track, output)
+            };
+            match proposed {
                 Ok((destination, key, changed)) => {
                     entry.destination = Some(destination);
                     entry.sanitized = changed;
@@ -192,7 +296,10 @@ pub fn generate(
                     for (depth, raw) in [
                         (2, vec![raw_artist.to_owned()]),
                         (3, vec![raw_artist.to_owned(), raw_album.to_owned()]),
-                    ] {
+                    ]
+                    .into_iter()
+                    .filter(|_| !identified)
+                    {
                         directories
                             .entry(key_parts[..depth].join("/"))
                             .or_default()
@@ -206,9 +313,17 @@ pub fn generate(
             }
         }
         if let Some(error) = failures.get(&source) {
-            entry
-                .notes
-                .push(format!("metadata/read error: {error}; source retained"));
+            let usable_identity = tracks.get(&source).is_some_and(|track| {
+                required(track.artist.as_deref(), "artist").is_ok()
+                    && required(track.title.as_deref(), "title").is_ok()
+            });
+            if usable_identity && error.starts_with("metadata parse failed:") {
+                entry.notes.push(format!("Metadata warning: {error}; Artist and Title recovered; organized using readable tags"));
+            } else {
+                entry
+                    .notes
+                    .push(format!("metadata/read error: {error}; source retained"));
+            }
         }
         if entry.destination.is_none() {
             match fallback(&source, input, output) {
@@ -226,7 +341,7 @@ pub fn generate(
         plan.entries.push(entry);
     }
     if let Some(hashes) = hashes {
-        attach_hashes(&mut plan, hashes);
+        attach_hashes(&mut plan, hashes, inputs);
     }
     for indices in keys.values() {
         let active: Vec<_> = indices
@@ -269,7 +384,7 @@ pub fn generate(
     plan
 }
 
-fn attach_hashes(plan: &mut BuildPlan, hashes: &HashCatalog) {
+fn attach_hashes(plan: &mut BuildPlan, hashes: &HashCatalog, inputs: &[PathBuf]) {
     let failures: BTreeMap<_, _> = hashes.errors.iter().map(|(p, e)| (p, e)).collect();
     let mut groups: BTreeMap<(FileType, [u8; 32]), Vec<usize>> = BTreeMap::new();
     for (index, entry) in plan.entries.iter_mut().enumerate() {
@@ -307,9 +422,42 @@ fn attach_hashes(plan: &mut BuildPlan, hashes: &HashCatalog) {
     }
     for indices in groups.values() {
         let representative = indices[0]; // Plan entries are in native source-path order.
+        if indices.iter().any(|&i| fingerprinted(&plan.entries[i]))
+            && !fingerprinted(&plan.entries[representative])
+        {
+            let root = indices
+                .iter()
+                .find_map(|&i| plan.entries[i].fingerprint_root.clone());
+            let entry = &mut plan.entries[representative];
+            if let Some(root) = root {
+                if let Some(name) = entry.destination.as_ref().and_then(|p| p.file_name()) {
+                    match nested_fingerprint_path(
+                        &entry.source,
+                        crate::paths::source_root(&entry.source, inputs).unwrap_or(Path::new("")),
+                        &root,
+                        name,
+                    ) {
+                        Ok(path) => entry.destination = Some(path),
+                        Err(error) => entry.issues.push(error),
+                    }
+                }
+                entry.fingerprint_root = Some(root);
+            }
+            entry.notes.push(
+                "AcoustID: exact-duplicate group includes metadata recovered by fingerprint lookup"
+                    .into(),
+            );
+        }
+        if plan.entries[representative].metadata_update.is_none() {
+            plan.entries[representative].metadata_update = indices
+                .iter()
+                .find_map(|&i| plan.entries[i].metadata_update.clone());
+        }
+        let update = plan.entries[representative].metadata_update.clone();
         let source = plan.entries[representative].source.clone();
         let destination = plan.entries[representative].destination.clone();
         for &index in &indices[1..] {
+            plan.entries[index].metadata_update = update.clone();
             plan.entries[index].action = Action::DuplicateOf(source.clone());
             if plan.entries[index].destination != destination {
                 let original = plan.entries[index].destination.clone();
@@ -545,6 +693,10 @@ pub fn check_existing_output_mode(plan: &mut BuildPlan, resume: bool) {
                 && entry.issues.is_empty()
                 && entry.destination.as_ref().is_some_and(|p| p.exists())
             {
+                if entry.metadata_update.is_some() {
+                    entry.notes.push("resume: tagged output will be compared with a freshly prepared copy during execution".into());
+                    continue;
+                }
                 match crate::execution::verify_existing(entry) {
                     Ok(()) => entry
                         .notes
@@ -695,6 +847,11 @@ pub fn write_plan(writer: &mut impl Write, plan: &BuildPlan) -> io::Result<()> {
         writer,
         "Planning report only. No files were copied while generating this plan."
     )
+}
+
+/// Provenance survives problem routing and copy retries without changing dedupe.
+pub fn fingerprinted(entry: &PlanEntry) -> bool {
+    entry.notes.iter().any(|n| n.starts_with("AcoustID: "))
 }
 
 #[cfg(test)]
@@ -904,6 +1061,9 @@ mod tests {
 
     fn track(path: &str) -> Track {
         Track {
+            metadata_notes: Vec::new(),
+            fingerprinted: false,
+            metadata_update: None,
             source_path: path.into(),
             file_type: FileType::Flac,
             source_stamp: None,
@@ -932,6 +1092,152 @@ mod tests {
             None,
         )
     }
+    #[test]
+    fn fingerprinted_paths_use_each_tracks_own_input_root() {
+        let mut first = track("one/Band/Live/song.flac");
+        let mut second = track("two/Band/Studio/song.flac");
+        first.fingerprinted = true;
+        second.fingerprinted = true;
+        let discovery = Catalog {
+            files: vec![first.source_path.clone(), second.source_path.clone()],
+            ..Catalog::default()
+        };
+        let inspection = TrackCatalog {
+            tracks: vec![first, second],
+            errors: vec![],
+        };
+        let mut plan = generate_many(
+            &discovery,
+            &inspection,
+            &[PathBuf::from("one"), PathBuf::from("two")],
+            Path::new("output"),
+            None,
+        );
+        crate::problems::route(&mut plan, Path::new("one"), Path::new("output"));
+        assert!(
+            plan.entries[0]
+                .destination
+                .as_ref()
+                .unwrap()
+                .starts_with("output/FLAC/Performer/Fingerprinted/Band/Live")
+        );
+        assert!(
+            plan.entries[1]
+                .destination
+                .as_ref()
+                .unwrap()
+                .starts_with("output/FLAC/Performer/Fingerprinted/Band/Studio")
+        );
+        assert!(
+            plan.entries
+                .iter()
+                .all(|entry| crate::problems::reasons(entry).is_empty())
+        );
+    }
+
+    #[test]
+    fn readable_identity_without_track_number_stays_out_of_problems() {
+        let mut value = track("song.mp3");
+        value.file_type = FileType::Mp3;
+        value.track_number = None;
+        let mut plan = make(vec![value]);
+        crate::problems::route(&mut plan, Path::new(""), Path::new("output"));
+        assert!(crate::problems::reasons(&plan.entries[0]).is_empty());
+        assert!(
+            plan.entries[0]
+                .destination
+                .as_ref()
+                .unwrap()
+                .starts_with("output/MP3")
+        );
+    }
+
+    #[test]
+    fn identified_duplicate_moves_shared_copy_under_fingerprinted() {
+        let f = Fixture::new();
+        for name in ["a.flac", "b.flac"] {
+            f.write(name, include_bytes!("../tests/fixtures/tone.flac"));
+        }
+        let (files, mut tracks, hashes) = f.evidence();
+        tracks
+            .tracks
+            .iter_mut()
+            .find(|t| t.source_path.ends_with("b.flac"))
+            .unwrap()
+            .fingerprinted = true;
+        let plan = f.plan(&files, &tracks, &hashes);
+        assert_eq!(plan.entries[0].destination, plan.entries[1].destination);
+        assert!(
+            plan.entries[0]
+                .destination
+                .as_ref()
+                .unwrap()
+                .components()
+                .any(|c| c.as_os_str() == "Fingerprinted")
+        );
+        assert!(matches!(plan.entries[1].action, Action::DuplicateOf(_)));
+    }
+
+    #[test]
+    fn recovered_tracks_are_separated_and_problem_routing_keeps_provenance() {
+        let mut recovered = track("Band/Album/recovered.flac");
+        recovered.fingerprinted = true;
+        let normal = track("normal.flac");
+        let mut plan = make(vec![recovered, normal]);
+        let recovered = plan.entries.iter_mut().find(|e| fingerprinted(e)).unwrap();
+        assert!(
+            recovered
+                .destination
+                .as_ref()
+                .unwrap()
+                .starts_with("output/FLAC/Performer/Fingerprinted/Band/Album")
+        );
+        recovered
+            .issues
+            .push("missing positive track number".into());
+        crate::problems::route(&mut plan, Path::new(""), Path::new("output"));
+        let recovered = plan.entries.iter().find(|e| fingerprinted(e)).unwrap();
+        assert!(
+            recovered
+                .destination
+                .as_ref()
+                .unwrap()
+                .starts_with("output/Problem Files/Missing Metadata/Band/Album")
+        );
+        for class in [
+            "Metadata Errors",
+            "Path Too Long",
+            "Copy Errors",
+            "Metadata Write Errors",
+            "Duplicate Problems",
+        ] {
+            let mut problem = recovered.clone();
+            crate::problems::mark(
+                &mut problem,
+                Path::new(""),
+                Path::new("output"),
+                class,
+                vec!["test problem".into()],
+            );
+            assert!(
+                problem.destination.as_ref().unwrap().starts_with(
+                    Path::new("output/Problem Files")
+                        .join(class)
+                        .join("Band/Album")
+                )
+            );
+            assert!(crate::problems::description(&problem, "test").contains("AcoustID:"));
+        }
+        let normal = plan.entries.iter().find(|e| !fingerprinted(e)).unwrap();
+        assert!(
+            normal
+                .destination
+                .as_ref()
+                .unwrap()
+                .starts_with("output/FLAC")
+        );
+    }
+
     #[test]
     fn loose_tracks_use_track_artist_and_title_without_numbering() {
         for kind in [
