@@ -102,35 +102,34 @@ fn destination(track: &Track, output: &Path) -> Result<(PathBuf, String, bool), 
     let title_name = clean(title)?;
     let folder = clean(album_artist)?;
     let album_name = clean(album.unwrap_or("Loose Tracks"))?;
-    let filename = clean(&format!(
-        "{prefix}{} - {}.{}",
-        title_name.as_str(),
-        artist_name.as_str(),
-        track.file_type.extension()
-    ))?;
     let group = track.file_type.group();
-    let relative: PathBuf = [
-        group,
-        folder.as_str(),
-        album_name.as_str(),
-        filename.as_str(),
-    ]
-    .iter()
-    .collect();
-    let full = output.join(relative);
-    // Conservative preview budget; not a promise of portability on every OS.
-    if full.as_os_str().as_encoded_bytes().len() > 240 {
-        return Err("proposed full path exceeds the conservative 240-byte budget".into());
+    let parent = output
+        .join(group)
+        .join(folder.as_str())
+        .join(album_name.as_str());
+    let budget = 180.min(240usize.saturating_sub(parent.as_os_str().as_encoded_bytes().len() + 1));
+    let extension = format!(".{}", track.file_type.extension());
+    if budget <= extension.len() + 16 {
+        return Err("insufficient filename space within path budget".into());
     }
+    let mut stem = format!("{prefix}{} - {}", title_name.as_str(), artist_name.as_str());
+    let mut shortened = false;
+    while stem.len() + extension.len() > budget {
+        stem.pop();
+        shortened = true;
+    }
+    let filename = clean(&format!("{}{extension}", stem.trim_end_matches([' ', '.'])))?;
+    let full = parent.join(filename.as_str());
     let key = format!(
         "{group}/{}/{}/{}",
         folder.collision_key(),
         album_name.collision_key(),
         filename.collision_key()
     );
-    let changed = [artist_name, title_name, folder, album_name, filename]
-        .iter()
-        .any(|name| name.changed);
+    let changed = shortened
+        || [artist_name, title_name, folder, album_name, filename]
+            .iter()
+            .any(|name| name.changed);
     Ok((full, key, changed))
 }
 
@@ -240,7 +239,9 @@ pub fn generate_many(
             output_evidence: None,
             fingerprint_root: None,
             source: source.clone(),
-            file_type: classify(&source),
+            file_type: tracks
+                .get(&source)
+                .map_or_else(|| classify(&source), |t| t.file_type),
             source_stamp: tracks.get(&source).and_then(|t| t.source_stamp.clone()),
             digest: None,
             action: Action::Pending,
@@ -326,7 +327,7 @@ pub fn generate_many(
             }
         }
         if entry.destination.is_none() {
-            match fallback(&source, input, output) {
+            match fallback(&source, input, output, entry.file_type) {
                 Ok((destination, key, changed)) => {
                     entry.destination = Some(destination);
                     entry.sanitized = changed;
@@ -627,12 +628,16 @@ fn finalize_actions(plan: &mut BuildPlan) {
 }
 
 /// Fallbacks retain relative directories so unrelated untagged files are not merged.
-fn fallback(source: &Path, input: &Path, output: &Path) -> Result<(PathBuf, String, bool), String> {
+fn fallback(
+    source: &Path,
+    input: &Path,
+    output: &Path,
+    kind: FileType,
+) -> Result<(PathBuf, String, bool), String> {
     use unicode_normalization::UnicodeNormalization;
     let relative = source
         .strip_prefix(input)
         .map_err(|_| "source outside input root")?;
-    let kind = classify(source);
     let mut path = PathBuf::from(kind.group());
     if kind != FileType::Unknown {
         path.push("_Unsorted");
@@ -904,9 +909,12 @@ mod tests {
     #[test]
     fn plan_dedupe_is_same_type_deterministic_and_preserves_unknowns() {
         let f = Fixture::new();
-        for name in ["b.FLAC", "a.flac", "same.mp3", "one.txt", "two.bin"] {
+        for name in ["b.FLAC", "a.flac"] {
             f.write(name, TONE);
         }
+        f.write("same.mp3", include_bytes!("../tests/fixtures/tone.mp3"));
+        f.write("one.txt", b"plain text");
+        f.write("two.bin", b"plain text");
         let (mut files, mut tracks, hashes) = f.evidence();
         let plan = f.plan(&files, &tracks, &hashes);
         assert_eq!(plan.unresolved(), 0);
@@ -1365,7 +1373,8 @@ mod tests {
             fallback(
                 Path::new("../escape.txt"),
                 Path::new(""),
-                Path::new("output")
+                Path::new("output"),
+                FileType::Unknown
             )
             .is_err()
         );
@@ -1373,7 +1382,8 @@ mod tests {
             fallback(
                 Path::new("elsewhere/a.txt"),
                 Path::new("input"),
-                Path::new("output")
+                Path::new("output"),
+                FileType::Unknown
             )
             .is_err()
         );

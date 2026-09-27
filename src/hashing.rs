@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_hash_groups_are_extension_scoped_for_every_type() {
+    fn exact_hash_groups_follow_detected_format_despite_extensions() {
         let f = Fixture::new();
         let mut tracks = Vec::new();
         for extension in ["flac", "m4a", "mp3", "ogg", "wav", "txt"] {
@@ -302,20 +302,9 @@ mod tests {
         let catalog = analyze(&tracks);
         assert_eq!(catalog.hashed, 12);
         assert!(catalog.errors.is_empty());
-        assert_eq!(catalog.groups.len(), 6);
-        assert!(catalog.groups.iter().all(|g| g.paths.len() == 2));
-        // All bytes are identical, but no group crosses an extension-defined type.
-        assert!(
-            catalog
-                .groups
-                .windows(2)
-                .all(|pair| pair[0].digest == pair[1].digest)
-        );
-        assert!(catalog.groups.iter().all(|g| {
-            g.paths
-                .iter()
-                .all(|p| crate::candidates::classify(p) == g.file_type)
-        }));
+        assert_eq!(catalog.groups.len(), 1);
+        assert_eq!(catalog.groups[0].paths.len(), 12);
+        assert_eq!(catalog.groups[0].file_type, FileType::Flac);
     }
 
     #[test]

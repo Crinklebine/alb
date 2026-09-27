@@ -6,8 +6,10 @@ mod cli;
 mod copying;
 mod discovery;
 mod execution;
+mod fingerprint_cache;
 mod hashing;
 mod inspection;
+mod media;
 mod paths;
 mod plan;
 mod platform;
@@ -32,7 +34,7 @@ fn scan(
     plan_output: Option<&Path>,
     execute: bool,
     resume: bool,
-    acoustid_key: Option<acoustid::ApiKey>,
+    fingerprint_options: (Option<acoustid::ApiKey>, bool),
 ) -> ExitCode {
     let mut catalog = discovery::Catalog::default();
     for input in inputs {
@@ -64,16 +66,32 @@ fn scan(
         .filter(|path| candidates::classify(path) != candidates::FileType::Unknown)
         .count();
     eprintln!(
-        "Classification: {} supported files, {} unknown files.",
+        "Classification: {} supported files, {} unknown files. (Extension hints.)",
         candidate_count,
         catalog.files.len() - candidate_count
     );
-    let inspected = inspection::inspect_with_key(&catalog.files, acoustid_key);
+    let inspected =
+        inspection::inspect_with_key(&catalog.files, fingerprint_options.0, fingerprint_options.1);
     eprintln!(
-        "Catalog: {} files, {} metadata/read errors.",
+        "Catalog: {} files, {} initial metadata/read warnings (before repair).",
         inspected.tracks.len(),
         inspected.errors.len()
     );
+    let corrections = inspected
+        .tracks
+        .iter()
+        .filter(|track| {
+            track
+                .metadata_notes
+                .iter()
+                .any(|note| note.starts_with("Format corrected:"))
+        })
+        .count();
+    if corrections > 0 {
+        eprintln!(
+            "Format detection: {corrections} files will use their detected audio format instead of the filename extension."
+        );
+    }
     let hashes = (hash || plan_output.is_some()).then(|| hashing::analyze(&inspected.tracks));
     if let Some(output) = plan_output {
         let planning = progress::Progress::new("Planning destinations", Some(catalog.files.len()));
@@ -103,7 +121,7 @@ fn scan(
                 .count()
         );
         eprintln!(
-            "Planned copies: {}; Exact duplicates: {}; Metadata warnings: {}.",
+            "Planned copies: {}; Exact duplicates: {}; Initial metadata warnings: {}.",
             plan.entries
                 .iter()
                 .filter(|e| e.action == plan::Action::Keep)
@@ -133,6 +151,12 @@ fn scan(
                 eprintln!(
                     "Build processing finished: {} verified copies, {} exact duplicates retained through their representatives; {} verified existing files reused.",
                     result.copied, result.duplicates, result.reused
+                );
+                eprintln!(
+                    "Metadata issues (files): {} successfully resolved; {} unresolved ({} repair attempts failed).",
+                    result.metadata_resolved,
+                    result.metadata_unresolved,
+                    result.metadata_repair_failures
                 );
                 eprintln!(
                     "Problem files: {}; files/errors not fully handled: {}. See output Problem Files and _ALB reports.",
@@ -190,6 +214,19 @@ fn scan(
 
 fn main() -> ExitCode {
     match cli::parse(env::args_os().skip(1).collect()) {
+        Ok(cli::Command::ClearCache) => {
+            let result = fingerprint_cache::directory()
+                .ok_or_else(|| std::io::Error::other("cannot locate ALB configuration directory"))
+                .and_then(fingerprint_cache::Cache::new)
+                .and_then(|cache| cache.clear());
+            match result {
+                Ok(n) => println!("Fingerprint cache cleared: {n} entries removed."),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
         Ok(cli::Command::Help) => println!("{}", cli::HELP),
         Ok(cli::Command::Version) => println!("alb {}", env!("CARGO_PKG_VERSION")),
         Ok(cli::Command::BuildHelp) => println!("{}", cli::BUILD_HELP),
@@ -209,7 +246,7 @@ fn main() -> ExitCode {
                 None,
                 false,
                 false,
-                args.acoustid_key,
+                (args.acoustid_key, args.no_fingerprint_cache),
             );
         }
         Ok(cli::Command::Build(paths)) => {
@@ -240,7 +277,7 @@ fn main() -> ExitCode {
                 Some(output.as_path()),
                 !dry_run,
                 resume,
-                acoustid_key,
+                (acoustid_key, paths.no_fingerprint_cache),
             );
         }
         Err(error) => {

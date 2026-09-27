@@ -322,7 +322,7 @@ fn flac_inspection_continues_after_failure_and_preserves_sources() {
     let before = snapshot(&source);
     let text = diagnostic(f.run(&source, &f.0.join("output")));
     assert!(
-        text.contains("Catalog: 3 files, 2 metadata/read errors."),
+        text.contains("Catalog: 3 files, 2 initial metadata/read warnings (before repair)."),
         "{text}"
     );
     assert_eq!(snapshot(&source), before);
@@ -393,7 +393,7 @@ fn scan_hash_reports_exact_flac_copies_without_omitting_files() {
         .arg("--hash")
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1)); // FLAC bytes named MP3: tag error, but hashing still works.
+    assert_eq!(output.status.code(), Some(0)); // Actual FLAC format wins over the misleading extension.
     let summary = String::from_utf8(output.stderr).unwrap();
     assert!(
         summary.contains("Exact file hashes: 3 files, 1 duplicate groups, 0 errors."),
@@ -402,7 +402,7 @@ fn scan_hash_reports_exact_flac_copies_without_omitting_files() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("PREFERRED:"));
     assert!(text.find("a.flac").unwrap() < text.find("z.flac").unwrap());
-    assert!(!text.contains("same-bytes.mp3"));
+    assert!(text.contains("same-bytes.mp3"));
     assert!(text.contains("No files omitted"));
     assert_eq!(snapshot(&source), before);
 }
@@ -581,7 +581,7 @@ fn malformed_flac_remains_in_catalog_and_can_be_hashed_exactly() {
         .unwrap();
     assert_eq!(result.status.code(), Some(1));
     let summary = String::from_utf8(result.stderr).unwrap();
-    assert!(summary.contains("Catalog: 2 files, 2 metadata/read errors"));
+    assert!(summary.contains("Catalog: 2 files, 2 initial metadata/read warnings"));
     assert!(summary.contains("Exact file hashes: 2 files, 1 duplicate groups, 0 errors"));
     assert_eq!(snapshot(&source), before);
 }
@@ -643,7 +643,7 @@ fn all_supported_formats_plan_by_metadata_without_source_changes() {
     assert!(result.stdout.is_empty());
     let report = String::from_utf8(result.stderr).unwrap();
     assert!(report.contains("Planned copies: 5"));
-    assert!(report.contains("Metadata warnings: 0"));
+    assert!(report.contains("Initial metadata warnings: 0"));
     assert_eq!(snapshot(&source), before);
     assert!(!f.0.join("out").exists());
 }

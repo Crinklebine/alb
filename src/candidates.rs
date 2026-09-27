@@ -1,4 +1,4 @@
-//! V1 output types are determined only by the final filename extension.
+//! Extension hints; source inspection replaces these with detected audio formats.
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -11,8 +11,10 @@ and leaves your source files unchanged. It runs on **macOS, Linux, and Windows**
   one verified representative within each supported format.
 - **Recover missing identification:** optionally use AcoustID to find Artist and
   Title, write recovered fields to new copies, and place them under Fingerprinted.
-- **Handle imperfect collections:** recover readable tags, report conflicting
-  values, and preserve unresolved files and their folder structure in Problem Files.
+- **Validate the final library:** normalize repairable metadata and require strict
+  read-back, preserving encoded audio and artwork.
+- **Handle imperfect collections:** detect mislabeled formats and obvious damage,
+  report conflicting tags, and preserve unresolved files in Problem Files.
 - **Preview and resume:** inspect a library, preview a build without writing files,
   or safely resume an interrupted run.
 - **Preserve archival information:** retain modification times, preserve creation
@@ -20,9 +22,7 @@ and leaves your source files unchanged. It runs on **macOS, Linux, and Windows**
 - **Show useful progress:** display operation counts, check destination free space,
   and keep detailed per-file results in `_ALB` reports.
 
-This README describes the **0.3.0 development tree**. Features described here may
-not yet be in the published crates.io release; use a local source install to test
-this tree.
+This README describes **ALB 0.4.12**.
 
 ## Install
 
@@ -136,12 +136,15 @@ Prefix relative paths beginning with `-` with `./`. Only `--input` is repeatable
 - **Scan:** read-only inventory, classification, and metadata inspection. Add
   `--verbose` for individual files or `--hash` for exact duplicates.
 - **Dry-run:** reads metadata, hashes files, plans destinations, and checks space.
-  Shows summary counts; creates no files, directories, or reports.
+  Shows summary counts; creates no library files, directories, or reports.
+  Optional fingerprint lookup can update the ALB configuration cache.
 - **Build:** copies files, verifies them, and records the outcome. File-level
   problems are handled separately so unrelated work can continue.
 - **Resume:** regenerates the plan and verifies existing outputs before reuse.
   Old partials and mismatched outputs stay untouched. Incomplete copies restart
   under new exclusive partial names; audit files are not used as trusted state.
+  Failed working copies created during the current run are removed after a verified
+  Problem Files fallback succeeds. If the fallback fails, the partials are retained.
 
 With an AcoustID key, both `scan` and `--dry-run` can make online lookups, although
 neither writes recovered tags to your files. Build terminal output contains
@@ -179,19 +182,22 @@ Single-input commands continue to work as before.
 
 ## Organization
 
-Classification is solely by final extension, ignoring case:
+ALB identifies supported audio containers from file contents. Filename extensions
+are hints, not the final decision. For example, WAV data named `.mp3` is organized
+under `WAV` with a `.wav` output extension. Recognized audio with an unfamiliar
+extension is handled as audio; ordinary non-audio files remain `UNKNOWN`.
 
-| Extension | Output group |
-| --- | --- |
-| .flac | FLAC |
-| .m4a | M4A |
-| .mp3 | MP3 |
-| .ogg | OGG |
-| .wav | WAV |
-| Anything else | UNKNOWN |
+| Detected format | Output group | Output extension |
+| --- | --- | --- |
+| FLAC | FLAC | `.flac` |
+| MP4/M4A audio | M4A | `.m4a` |
+| MPEG audio | MP3 | `.mp3` |
+| Supported Ogg audio | OGG | `.ogg` |
+| RIFF/WAV | WAV | `.wav` |
+| Other files | UNKNOWN | Source extension retained |
 
-For example, .m4b, .mp4, .opus, .oga and .wave are UNKNOWN. M4A and OGG internal
-codecs never change the group. All five known types have sorting-metadata readers.
+Corrections are recorded in the report. Unrecognized or unsupported containers
+with a supported audio extension are retained as problem files for review.
 
 ```text
 TYPE/Album Artist or Artist/Album/[DISC-]TRACK - TITLE - ARTIST.extension
@@ -209,34 +215,131 @@ Normalized folder aliases use deterministic spelling; different files targeting
 one filename receive distinct source-path-based suffixes. No arbitrary winner
 is selected. Names assume unchanged input roots and conflict membership.
 
-Dedupe uses whole-file BLAKE3 within each known type, never decoded audio.
+Dedupe uses whole-file BLAKE3 within each detected audio type, never decoded audio.
 A duplicate is omitted only after a verified representative exists. UNKNOWN
 files and problem files retain independent copies. Cross-type files remain separate.
 No audio-validity, audio-equivalence or quality claim is made.
 
-## Metadata reading and conflicts
+## Metadata validation and normalization
 
-ALB tries strict metadata parsing, then best-attempt and relaxed parsing when a
-parse error occurs. Usable Artist and Title allow organization despite a strict
-parser warning; the warning stays in the report. Missing track numbers do not
-quarantine a file: its filename simply omits the numbering.
+New audio copies enter the organized library only with nonblank Artist and Title,
+valid sorting text, and a successful **strict metadata read-back**. Album and
+Album Artist are preserved when available; missing optional fields are acceptable.
+This is a defined technical validation gate, not a guarantee that artist names,
+song titles, or other tags are factually correct.
 
-For MP3 files with consecutive leading ID3v2 blocks, fields are read separately.
-The first nonblank value wins for each field; later blocks and then ID3v1 fill
-missing fields. Blank values cannot erase usable values. Conflicting Artist,
-Title, and Album values are recorded in the report; ALB does not determine which
-conflicting value is factually correct. The separate-block reader is bounded to
-32 blocks of at most 16 MiB each.
+ALB reads imperfect source metadata using strict, best-attempt, then relaxed
+parsing. It trims surrounding whitespace and normalizes Unicode in sorting
+fields. Embedded control characters that cannot be safely interpreted require
+review. Missing track numbers omit filename numbering rather than blocking a file.
 
-Metadata writes use the known format where available and read back recovered
-fields using the same MP3 block precedence. AcoustID-written Artist and Title
-must pass the read-back check. Existing embedded tags are not comprehensively
-normalized: accepting readable tags does **not** certify that every tag is
-standards-compliant or factually correct. Full metadata normalization is future
-work. Files whose extensions do not match their containers can still cause
-reader/writer problems; automatic format correction is not implemented.
+For MP3 files with consecutive leading ID3v2 blocks, the first nonblank value wins
+for each field. Later blocks and ID3v1 fill gaps; conflicting Artist, Title, and
+Album values remain in the report. When repair is needed, ALB consolidates leading
+ID3v2 blocks into one tag, rewrites recoverable metadata through the tag library,
+and synchronizes identity in existing legacy tags. Malformed fields that relaxed
+parsing discards may be omitted during repair; the source and parser warning remain
+available. Processing is bounded to 32 ID3 blocks, 16 MiB per block, and 32 MiB of
+leading ID3 data. Unsupported repairs are quarantined rather than accepted.
+
+Already compliant copies need no tag rewrite. Repairs happen only on newly copied
+output files. After repair, required fields must read back, the encoded audio
+payload must match, and existing readable artwork must remain. Valid unrelated
+tags are retained through the format's tag writer; conflicting artwork that cannot
+be merged safely requires review. Failed repairs go to
+`Problem Files/Metadata Write Errors` as unchanged source copies, with the failing
+stage and underlying error in the explanation. Existing outputs are never repaired
+in place or overwritten.
+
+### Early damage detection
+
+Before metadata lookup, ALB rejects empty audio files, files containing only zero
+bytes, and structurally truncated supported containers. Detected damage goes to
+`Problem Files/Damaged Files`; these files do not invoke `fpcalc` or AcoustID.
+An understated WAV RIFF length can be repaired if its actual chunks remain intact.
+WAV files with external ID3 tags are recognized and their tags moved inside the
+output WAV container, while preserving encoded audio. Invalid ID3 comment language
+bytes are repaired to `und` (undetermined), preserving comment text and descriptions.
+Repairs that would create duplicate comment identities remain for manual review. A playable file can still
+be truncated: players may skip a damaged final packet or stop early.
+
+These checks validate container boundaries and tag readability, not every decoded
+audio sample. Some damaged streams may still require an audio decoder to diagnose.
+Chained/multiplexed Ogg and oversized metadata are conservatively retained for
+manual review. Damaged originals are preserved; missing audio cannot be invented.
+
+Missing or malformed ID3v1 years are normalized to `0000` (unknown); valid years
+are retained. ALB does not invent a recording date.
+
+When Unicode identity text cannot fit the ID3v1 character set, ALB preserves
+legacy fields in ID3v2 and removes the incompatible ID3v1 tag from the output.
+Empty Album Artist values are normalized to absent. Provably empty, invalid
+ID3 identifier and truncated comment frames are removed; useful comments,
+artwork, and encoded audio remain protected by the normal checks. Recognized
+legacy `MP3ext ` padding is normalized to zero padding; genuine tag-frame
+boundary errors still require review.
 
 ## Optional AcoustID metadata fallback
+
+### Persistent fingerprint cache
+
+Fingerprint lookup automatically saves fingerprints and accepted lookup results in
+ALB's configuration directory. No API keys or source paths are stored. Records are
+small JSON files under `cache/fingerprints-v1/`:
+
+| Platform | ALB configuration directory |
+|---|---|
+| Linux | `$XDG_CONFIG_HOME/alb/`, default `~/.config/alb/` |
+| macOS | `~/Library/Application Support/alb/` |
+| Windows | `%APPDATA%\alb\` |
+
+Unchanged file contents reuse cached results across runs, renames, and output
+folders. Successful matches expire after 90 days; unmatched results after 7 days.
+Expired lookups reuse their saved fingerprint. Changed file contents get a new
+cache entry. Network failures, invalid replies, and rejected credentials are not
+cached as unmatched results. Corrupt cache records are ignored. Cache storage
+failure does not prevent library processing. The versioned cache namespace allows
+future fingerprint algorithm changes to invalidate incompatible entries.
+
+The fingerprint summary separates new attempts from cached matches and cached
+unmatched results, for example:
+
+```text
+Fingerprinting: new: 10 attempts, 4 matched (40.0%); cached: 424 matched, 455 unmatched.
+Fingerprinting: new: 0 attempts; cached: 0 matched, 22 unmatched.
+```
+
+New attempts include unsuccessful fingerprint generation and lookup failures;
+cached unmatched results mean a previous lookup found no accepted match. The
+percentage applies only to new attempts and is omitted when there are none. Unexpired cached matches are used even
+without a key. A key is required only for new or expired network lookups; without
+one, cache misses and expired results leave the file's metadata unchanged.
+
+Use `--no-fingerprint-cache` with `build` or `scan` to disable both cache reads and
+writes. With no key, this disables fingerprint recovery entirely. With a key,
+ALB performs fresh lookups without using or updating the cache:
+
+```sh
+alb build --input Audio --output Audio-Lib --no-fingerprint-cache
+alb scan --input Audio --no-fingerprint-cache
+```
+Scan and dry-run may update this cache, but never modify source files.
+
+Clear the fingerprint cache without touching settings or music (all platforms):
+
+```sh
+alb --clear-cache
+```
+
+This command exits after clearing. An active build may repopulate the cache, so
+clear it between runs. Existing runs from before this feature cannot populate the
+cache retrospectively; the first new run builds it.
+
+
+When lookup is enabled, a separate summary line reports fingerprint attempts,
+accepted Artist/Title matches, and the percentage of attempts that matched. Failed
+fingerprint generation counts as an attempt; skipped files do not. A successful
+match does not guarantee the file will pass later metadata or audio checks.
 
 Supply an AcoustID **application client key** with either `scan` or `build`:
 
@@ -247,11 +350,12 @@ alb build --input /path/to/source --output /path/to/library --acoustid-key YOUR_
 Install Chromaprint's `fpcalc` executable and make it available on `PATH`.
 ALB fingerprints supported audio files only when Artist or Title is missing or
 blank and a key was supplied. Missing Album, Album Artist, track/disc number or
-year alone never triggers lookup. Only missing Artist and Title are filled;
-existing embedded values always win. Album/release identification is not attempted,
-and source files are never retagged. Recovered Artist/Title are written into the
-new output copy before publication. Only recovered fields are changed; embedded
-values, other metadata and artwork are retained by the tag writer. No audio
+year alone never triggers lookup. Only missing Artist and Title are recovered
+from the service; existing usable embedded values take precedence. Album/release
+identification is not attempted, and source files are never retagged. Recovered
+Artist/Title are written into the new output copy before publication. All normal
+audio output also passes the metadata gate described above; readable embedded
+identity, other valid metadata, and artwork are retained during repair. No audio
 transcoding is performed. If tagging fails, the original bytes are copied to
 `Problem Files/Metadata Write Errors` with an explanation.
 
@@ -289,7 +393,7 @@ may expose the argument; keep your key private.
 ## Problem Files and reports
 
 File-level errors do not stop unrelated work. Classes include missing metadata,
-metadata parsing, long paths, read errors, destination conflicts and copy errors.
+metadata parsing/writing, damaged files, long paths, read errors, destination conflicts and copy errors.
 Each handled problem copy has an adjacent text explanation with the source path,
 original destination, detailed causes and outcome.
 
@@ -312,11 +416,12 @@ handling; `FINISHED_WITH_ERRORS` records remaining failures. Missing completion
 indicates interruption. Existing explanations are reused only when identical;
 changed explanations receive new numbered names.
 
-### Copies with recovered tags
+### Copies with normalized or recovered tags
 
-A retagged output is intentionally different from its source. ALB verifies the
-initial copy before tagging, reopens the output to check the recovered tags, then
-records its final size/hash separately from source evidence. Original timestamps
+A normalized or retagged output can intentionally differ from its source. ALB
+verifies the initial copy before tagging, strictly checks the required tags and
+preserved audio, then records its final size/hash separately from source evidence.
+Successful normal-library copies have a `METADATA_GATE PASSED` audit record. Original timestamps
 are restored after tagging. Existing output files are never retagged or overwritten.
 
 Resume for tagged files prepares a fresh tagged comparison copy in the output
@@ -412,11 +517,58 @@ A separate, opt-in AcoustID contribution workflow is under consideration. There
 is currently **no `alb share` command**. Builds and lookups do not submit tags or
 fingerprints as database contributions. Lookup requests only query AcoustID.
 
-Comprehensive output-tag normalization and compliance validation are also planned;
-they are not guarantees of the current build.
+Broader container repair and decoder-level audio validation are possible future
+work. The current metadata gate and damage checks are defined above.
 
 ## License
 
 ALB is licensed under the GNU General Public License, version 3 or (at your
 option) any later version (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for the
 full license text.
+
+### Metadata outcome summary
+
+Build reports initial inspection warnings separately from final metadata outcomes:
+
+```text
+Metadata issues (files): 120 successfully resolved; 8 unresolved (2 repair attempts failed).
+```
+
+Counts are per source file, not per warning or tag. Resolved means a known metadata
+issue was resolved or output tags were normalized, and the final library output
+passed validation. Verified duplicate representatives and resumed outputs can
+resolve known source warnings too. Unresolved includes missing required metadata
+and issues without a successfully validated normal-library output. Repair failures
+are a subset of unresolved files, not an additional count. Damage, filesystem
+errors, and other non-metadata problems are reported separately through Problem
+Files. These totals are also retained as `METADATA_SUMMARY` in the `_ALB` run report.
+Scan and dry-run cannot report completed repairs because they do not process output.
+
+### Long names, videos, and previously processed problem files
+
+Generated audio filenames are shortened when needed to fit the conservative
+240-byte path budget. Full tags remain unchanged; normal collision handling keeps
+files with the same shortened name distinct. Paths whose directories leave too
+little room still require review.
+
+MP4 containers with an actual video track are preserved under `UNKNOWN`, including
+files mislabeled `.m4a`. Embedded cover artwork alone does not make an audio file a
+video. ALB does not extract or convert the video's audio.
+
+When reprocessing an ALB output, a matching adjacent ALB problem report allows
+leading `Problem Files/<category>` wrappers to be collapsed. Remaining source
+folders and filenames are preserved. Folders without a matching report are left
+intact; old reports are preserved as ordinary input files.
+
+Missing required Artist or Title takes precedence over repairable metadata parsing
+warnings in the problem category; both reasons remain in the explanation. Duplicate
+problem reports explain that the representative has an unresolved problem and the
+source is being preserved independently.
+
+Zero disc numbers are treated as unspecified and removed from normalized output
+tags, while valid track numbering is retained. Non-WAVE RIFF files (such as AVI
+and WebP) remain `UNKNOWN`. For unknown extensions without a recognized container
+or ID3 signature, MPEG detection requires two complete, consistent frames. This
+avoids mistaking UTF-16 text for MP3. Extremely short or free-format untagged audio
+with an unknown extension may remain `UNKNOWN`; known audio extensions retain their
+existing validation path.

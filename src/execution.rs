@@ -16,7 +16,34 @@ pub struct BuildResult {
     pub duplicates: usize,
     pub problems: usize,
     pub failed: usize,
+    pub metadata_resolved: usize,
+    pub metadata_unresolved: usize,
+    pub metadata_repair_failures: usize,
 }
+fn has_metadata_issue(entry: &PlanEntry) -> bool {
+    entry.file_type != crate::candidates::FileType::Unknown
+        && ((entry
+            .notes
+            .iter()
+            .any(|n| n.contains("fallback path preserves source-relative layout"))
+            && !entry.notes.iter().any(|n| {
+                n.contains("metadata/read error:") && !n.contains("metadata parse failed:")
+            }))
+            || entry.notes.iter().any(|n| {
+                n.starts_with("Metadata warning:")
+                    || n.starts_with("Metadata conflict:")
+                    || n.starts_with("AcoustID:")
+                    || n.contains("metadata parse failed:")
+                    || n.contains("embedded control characters")
+                    || n.starts_with("PROBLEM: missing artist")
+                    || n.starts_with("PROBLEM: missing title")
+            })
+            || entry
+                .issues
+                .iter()
+                .any(|s| s.starts_with("missing artist") || s.starts_with("missing title")))
+}
+
 fn invalid(text: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, text)
 }
@@ -193,6 +220,12 @@ pub fn execute(
     Ok(result)
 }
 
+struct FailedPartial {
+    parent: Directory,
+    name: OsString,
+    file: File,
+}
+
 // Only quarantine copies choose an alternative name on a real destination collision.
 fn copy_problem_aware(
     entry: &mut PlanEntry,
@@ -201,6 +234,7 @@ fn copy_problem_aware(
     output: &Directory,
     output_root: &Path,
     resume: bool,
+    failed_partials: &mut Vec<FailedPartial>,
 ) -> io::Result<bool> {
     let original = entry.destination.clone();
     for attempt in 0..100 {
@@ -230,7 +264,15 @@ fn copy_problem_aware(
                 Err(error) => return Err(error),
             }
         }
-        let result = copy_one(entry, input, input_root, output, output_root, resume);
+        let result = copy_one(
+            entry,
+            input,
+            input_root,
+            output,
+            output_root,
+            resume,
+            failed_partials,
+        );
         match result {
             Err(ref error)
                 if error.kind() == io::ErrorKind::AlreadyExists
@@ -256,6 +298,7 @@ fn copy_one(
     output: &Directory,
     output_root: &Path,
     resume: bool,
+    failed_partials: &mut Vec<FailedPartial>,
 ) -> io::Result<bool> {
     let destination = entry
         .destination
@@ -312,33 +355,49 @@ fn copy_one(
             Err(e) => return Err(e),
         }
     };
-    copying::transfer_verified(&mut source, &mut partial, stamp(entry)?, digest(entry)?)?;
-    if let Some(update) = &entry.metadata_update {
-        crate::tagging::apply(&mut partial, update, entry.file_type)?;
-        crate::platform::set_times(&partial, stamp(entry)?.modified, stamp(entry)?.created)?;
-    }
-    use std::io::Seek;
-    partial.rewind()?;
-    let final_evidence = if entry.metadata_update.is_some() {
-        hashing::hash_reader(&mut partial)?
-    } else {
-        (digest(entry)?, stamp(entry)?.len)
-    };
-    open_source(input, input_root, entry)?; // Also confirm the path still identifies this source.
-    let partial_stamp = SourceStamp::from_file(&partial)?;
-    if SourceStamp::from_file(&parent.read(&partial_name)?)? != partial_stamp {
-        return Err(io::Error::other("partial path changed before publication"));
-    }
-    if reuse_tagged {
+    let mut published = false;
+    let result = (|| {
+        copying::transfer_verified(&mut source, &mut partial, stamp(entry)?, digest(entry)?)?;
+        if let Some(update) = &entry.metadata_update {
+            if crate::tagging::apply(&mut partial, update, entry.file_type)? {
+                entry
+                    .notes
+                    .push("Metadata normalization: output tags repaired and verified".into());
+            }
+            crate::platform::set_times(&partial, stamp(entry)?.modified, stamp(entry)?.created)?;
+        }
+        use std::io::Seek;
+        partial.rewind()?;
+        let final_evidence = if entry.metadata_update.is_some() {
+            hashing::hash_reader(&mut partial)?
+        } else {
+            (digest(entry)?, stamp(entry)?.len)
+        };
+        open_source(input, input_root, entry)?; // Also confirm the path still identifies this source.
+        let partial_stamp = SourceStamp::from_file(&partial)?;
+        if SourceStamp::from_file(&parent.read(&partial_name)?)? != partial_stamp {
+            return Err(io::Error::other("partial path changed before publication"));
+        }
+        if reuse_tagged {
+            verify_file(parent.read(&name)?, final_evidence.0, final_evidence.1)?;
+            parent.remove_partial(&partial_name, &partial)?;
+            entry.output_evidence = Some(final_evidence);
+            return Ok(true);
+        }
+        parent.publish(&partial_name, &name)?;
+        published = true;
         verify_file(parent.read(&name)?, final_evidence.0, final_evidence.1)?;
-        parent.remove_partial(&partial_name, &partial)?;
         entry.output_evidence = Some(final_evidence);
-        return Ok(true);
+        Ok(false)
+    })();
+    if result.is_err() && !published {
+        failed_partials.push(FailedPartial {
+            parent,
+            name: partial_name,
+            file: partial,
+        });
     }
-    parent.publish(&partial_name, &name)?;
-    verify_file(parent.read(&name)?, final_evidence.0, final_evidence.1)?;
-    entry.output_evidence = Some(final_evidence);
-    Ok(false)
+    result
 }
 
 /// Sidecars use exclusive writes, atomic publication, and verified identical reuse.
@@ -453,6 +512,8 @@ pub fn execute_resilient(
         progress.set(index);
         let mut entry = original.clone();
         let mut duplicate = false;
+        let mut metadata_repair_failed = false;
+        let mut failed_partials = Vec::new();
         let operation = (|| -> io::Result<bool> {
             if let Action::DuplicateOf(representative) = &entry.action {
                 if !published.contains_key(representative) {
@@ -484,6 +545,7 @@ pub fn execute_resilient(
                 &output,
                 &roots.output,
                 resume,
+                &mut failed_partials,
             )
         })();
         let operation = match operation {
@@ -491,6 +553,7 @@ pub fn execute_resilient(
             Err(error) => {
                 duplicate = false;
                 let tagging_failed = error.to_string().starts_with("metadata update failed:");
+                metadata_repair_failed |= tagging_failed;
                 if tagging_failed {
                     entry.metadata_update = None;
                 }
@@ -539,6 +602,7 @@ pub fn execute_resilient(
                     &output,
                     &roots.output,
                     resume,
+                    &mut failed_partials,
                 )
                 .or_else(|error| {
                     // A first failure may have been a destination conflict; tagging
@@ -548,6 +612,7 @@ pub fn execute_resilient(
                     {
                         return Err(error);
                     }
+                    metadata_repair_failed = true;
                     entry.metadata_update = None;
                     crate::problems::mark(
                         &mut entry,
@@ -565,16 +630,43 @@ pub fn execute_resilient(
                         &output,
                         &roots.output,
                         resume,
+                        &mut failed_partials,
                     )
                 })
             }
         };
         let is_problem = !crate::problems::reasons(&entry).is_empty();
+        // Count each source once; repaired duplicates/resumed files have verified output evidence.
+        if has_metadata_issue(original)
+            || metadata_repair_failed
+            || entry
+                .notes
+                .iter()
+                .any(|n| n.starts_with("Metadata normalization:"))
+        {
+            if operation.is_ok() && !is_problem && entry.metadata_update.is_some() {
+                result.metadata_resolved += 1;
+            } else {
+                result.metadata_unresolved += 1;
+            }
+        }
+        result.metadata_repair_failures += usize::from(metadata_repair_failed);
         if is_problem {
             result.problems += 1;
         }
         match operation {
             Ok(reused) => {
+                // The fallback is verified. Delete only temporaries owned by this entry.
+                for partial in failed_partials {
+                    if let Err(error) = partial.parent.remove_partial(&partial.name, &partial.file)
+                    {
+                        result.failed += 1;
+                        report.failure(
+                            &entry,
+                            &format!("file preserved, but temporary cleanup failed: {error}"),
+                        )?;
+                    }
+                }
                 if is_problem
                     && let Err(error) = sidecar(
                         &output,
@@ -659,6 +751,11 @@ pub fn execute_resilient(
         )?;
     }
     progress.set(plan.entries.len());
+    report.metadata_summary(
+        result.metadata_resolved,
+        result.metadata_unresolved,
+        result.metadata_repair_failures,
+    )?;
     if result.failed == 0 {
         report.complete(result.copied, result.duplicates, result.reused)?;
     } else {
@@ -752,6 +849,7 @@ mod tests {
         track.metadata_update = Some(crate::tagging::MetadataUpdate {
             artist: Some("Recovered Artist".into()),
             title: Some("Recovered Title".into()),
+            ..Default::default()
         });
         track.artist = Some("Recovered Artist".into());
         track.title = Some("Recovered Title".into());
@@ -774,6 +872,8 @@ mod tests {
         let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), false).unwrap();
         assert_eq!(result.failed, 0);
         assert_eq!(result.problems, 0);
+        assert_eq!(result.metadata_resolved, 1);
+        assert_eq!(result.metadata_unresolved, 0);
         assert!(!f.0.join("out/Problem Files").exists());
         let audit = fs::read_dir(f.0.join("out/_ALB"))
             .unwrap()
@@ -797,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_tagging_preserves_original_bytes_in_problem_folder() {
+    fn damaged_audio_preserves_original_bytes_in_problem_folder() {
         let f = Fixture::new();
         f.write("broken.mp3", b"not decodable audio");
         let mut plan = f.plan();
@@ -805,13 +905,14 @@ mod tests {
             entry.metadata_update = Some(crate::tagging::MetadataUpdate {
                 artist: Some("Artist".into()),
                 title: Some("Title".into()),
+                ..Default::default()
             });
         }
         crate::problems::route(&mut plan, &f.0.join("in"), &f.0.join("out"));
         let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), false).unwrap();
         assert_eq!(result.failed, 0);
         assert_eq!(result.copied, 1);
-        let copied = fs::read_dir(f.0.join("out/Problem Files/Metadata Write Errors"))
+        let copied = fs::read_dir(f.0.join("out/Problem Files/Damaged Files"))
             .unwrap()
             .map(|p| p.unwrap().path())
             .find(|p| p.extension().is_some_and(|e| e == "mp3"))
@@ -895,6 +996,7 @@ mod tests {
             track.metadata_update = Some(crate::tagging::MetadataUpdate {
                 artist: track.artist.clone(),
                 title: track.title.clone(),
+                ..Default::default()
             });
         }
         let hashes = crate::hashing::analyze(&tracks.tracks);
@@ -914,7 +1016,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(result.failed, 0, "{audit}");
-        assert_eq!(result.copied, 5);
+        assert_eq!(result.copied, 5, "{audit}");
         assert_eq!(result.duplicates, 5);
         for entry in &plan.entries {
             let tagged = Probe::open(entry.destination.as_ref().unwrap())
@@ -1058,6 +1160,22 @@ mod tests {
             }
             assert_eq!(fs::read(f.0.join("in/a.txt")).unwrap(), b"source");
         }
+    }
+
+    #[test]
+    fn resilient_failed_fallback_retains_original_partial() {
+        let f = Fixture::new();
+        f.write("song.txt", b"original data");
+        let mut plan = f.plan();
+        plan.entries[0].digest = Some([0; 32]);
+        let destination = plan.entries[0].destination.as_ref().unwrap();
+        let result = execute_resilient(&plan, &f.0.join("in"), &f.0.join("out"), false).unwrap();
+        assert_eq!(result.failed, 1);
+        assert!(!destination.exists());
+        let mut partial = destination.as_os_str().to_os_string();
+        partial.push(".alb-partial");
+        assert!(Path::new(&partial).exists());
+        assert_eq!(fs::read(f.0.join("in/song.txt")).unwrap(), b"original data");
     }
 
     #[test]

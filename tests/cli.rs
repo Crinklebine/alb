@@ -194,3 +194,117 @@ fn removed_analyzer_option_is_rejected() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn clear_cache_uses_config_directory_and_preserves_settings() {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    let root = std::env::temp_dir().join(format!(
+        "alb-cli-cache-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    #[cfg(target_os = "macos")]
+    let base = root.join("Library/Application Support/alb");
+    #[cfg(not(target_os = "macos"))]
+    let base = root.join("alb");
+    let cache = base.join("cache/fingerprints-v1");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(base.join("config.toml"), b"settings").unwrap();
+    fs::write(cache.join(format!("{}.json", "a".repeat(64))), b"{}").unwrap();
+    for expected in [1, 0] {
+        let output = Command::new(env!("CARGO_BIN_EXE_alb"))
+            .arg("--clear-cache")
+            .env("XDG_CONFIG_HOME", &root)
+            .env("APPDATA", &root)
+            .env("HOME", &root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("{expected} entries removed"))
+        );
+    }
+    assert_eq!(fs::read(base.join("config.toml")).unwrap(), b"settings");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cached_matches_work_without_key_and_can_be_disabled() {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    let root = std::env::temp_dir().join(format!(
+        "alb-offline-cache-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let input = root.join("in");
+    fs::create_dir_all(&input).unwrap();
+    let bytes = include_bytes!("fixtures/untagged.mp3");
+    fs::write(input.join("song.mp3"), bytes).unwrap();
+    #[cfg(target_os = "macos")]
+    let base = root.join("Library/Application Support/alb");
+    #[cfg(not(target_os = "macos"))]
+    let base = root.join("alb");
+    let cache = base.join("cache/fingerprints-v1");
+    fs::create_dir_all(&cache).unwrap();
+    let record = serde_json::json!({"checked": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(), "match": {"artist": "Cached Artist", "title": "Cached Title"}});
+    let path = cache.join(format!("{}.json", blake3::hash(bytes).to_hex()));
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    for disabled in [false, true] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_alb"));
+        cmd.arg("build")
+            .arg("--input")
+            .arg(&input)
+            .arg("--output")
+            .arg(root.join(if disabled { "off" } else { "on" }))
+            .env("XDG_CONFIG_HOME", &root)
+            .env("APPDATA", &root)
+            .env("HOME", &root)
+            .env("PATH", &root);
+        if disabled {
+            cmd.arg("--no-fingerprint-cache");
+        }
+        let output = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(
+            stderr.contains(if disabled {
+                "Problem files: 1"
+            } else {
+                "Problem files: 0"
+            }),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(if disabled {
+                "0 successfully resolved; 1 unresolved (0 repair attempts failed)"
+            } else {
+                "1 successfully resolved; 0 unresolved (0 repair attempts failed)"
+            }),
+            "{stderr}"
+        );
+        if !disabled {
+            assert!(stderr.contains("new: 0 attempts"));
+            assert!(stderr.contains("cached: 1 matched, 0 unmatched"));
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    fs::remove_dir_all(root).unwrap();
+}

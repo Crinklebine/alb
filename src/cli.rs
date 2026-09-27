@@ -14,6 +14,7 @@ Commands:
 Options:
   -h, --help       Print help
   -V, --version    Print version
+  --clear-cache    Clear the persistent fingerprint cache and exit
 
 Build supports Linux, macOS and Windows; use --dry-run to preview without writes.
 Use 'alb build --help' or 'alb scan --help' for command options.
@@ -22,20 +23,25 @@ Source libraries must always remain immutable.";
 pub const BUILD_HELP: &str = "Usage: alb build --input SOURCE [--input SOURCE ...] --output DESTINATION [--dry-run] [--resume]
 
 Options:
+  --no-fingerprint-cache  Disable fingerprint cache reads and writes (enabled by default)
   --acoustid-key KEY     Optional Artist/Title fallback using fpcalc and AcoustID
   --input SOURCE         Required; repeat for multiple source libraries
   --output DESTINATION   Required output library path
   --resume               Verify and reuse matching outputs; retain old partials
-  --dry-run              Hash files and summarize planned work; never write files
+  --dry-run              Hash files and summarize planned work; never write library files
   -h, --help             Print help
 
+Unexpired cached matches work without a key. New or expired lookups require a key.
 Use separate option values. Prefix paths beginning with '-' with './'.
 Root paths are checked for equal or nested directories, including symlink aliases.
 All inputs must exist and must not overlap each other or the output.
-Output may be absent. Dry-run creates no directories.
+Output may be absent. Dry-run creates no library directories; fingerprint lookup may update the ALB config cache.
 Discovery counts regular files and skips all symlinks.
-Files are grouped by extension: FLAC, M4A, MP3, OGG, WAV, UNKNOWN.
-Basic metadata is read for all five supported types without changing files.
+File contents determine FLAC, M4A, MP3, OGG, or WAV; other files use UNKNOWN.
+Wrong audio extensions are corrected on output. Empty, zero-filled, and structurally
+truncated audio goes to Problem Files/Damaged Files without fingerprint lookup.
+Audio requires Artist and Title. Output tags are normalized when necessary and
+strictly read back; encoded audio and artwork must be preserved. Sources stay unchanged.
 Build copies through verified partial files and never overwrites destinations.
 Copies preserve modification time; macOS/Windows also restore available creation time.
 Original timestamps are archived in _ALB reports on all platforms.
@@ -49,19 +55,23 @@ pub const SCAN_HELP: &str =
     "Usage: alb scan --input SOURCE [--input SOURCE ...] [--verbose] [--hash]
 
 Options:
+  --no-fingerprint-cache  Disable fingerprint cache reads and writes (enabled by default)
   --acoustid-key KEY  Optional Artist/Title fallback using fpcalc and AcoustID
   --input SOURCE  Required; repeat for multiple source libraries
   --verbose       Print per-file types, metadata, and errors
   --hash          Hash all catalog files and report exact duplicate groups
   -h, --help      Print help
 
-Scan is read-only. All symlinks below the input root are skipped.
-Classification uses extensions only. Basic tags populate the generic catalog.
+Unexpired cached matches work without a key. New or expired lookups require a key.
+Scan leaves sources unchanged; optional fingerprint lookup updates the ALB config cache. All symlinks below the input root are skipped.
+File contents determine supported formats. Reports retain format corrections
+and metadata warnings. Scan never repairs or writes library files.
 Exit status: 0 completed, 1 scan/inspection failure, 2 usage error.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScanArgs {
     pub acoustid_key: Option<ApiKey>,
+    pub no_fingerprint_cache: bool,
     pub input: Vec<PathBuf>,
     pub verbose: bool,
     pub hash: bool,
@@ -70,6 +80,7 @@ pub struct ScanArgs {
 #[derive(Debug, PartialEq, Eq)]
 pub struct BuildArgs {
     pub acoustid_key: Option<ApiKey>,
+    pub no_fingerprint_cache: bool,
     pub input: Vec<PathBuf>,
     pub output: PathBuf,
     pub dry_run: bool,
@@ -80,6 +91,7 @@ pub struct BuildArgs {
 pub enum Command {
     Help,
     Version,
+    ClearCache,
     BuildHelp,
     ScanHelp,
     Scan(ScanArgs),
@@ -110,6 +122,7 @@ impl std::error::Error for CliError {}
 pub fn parse(args: Vec<OsString>) -> Result<Command, CliError> {
     match args.as_slice() {
         [] => Ok(Command::Help),
+        [arg] if arg == "--clear-cache" => Ok(Command::ClearCache),
         [arg] if arg == "--help" || arg == "-h" => Ok(Command::Help),
         [arg] if arg == "--version" || arg == "-V" => Ok(Command::Version),
         [command, rest @ ..] if command == "build" => parse_build(rest),
@@ -125,11 +138,19 @@ fn parse_build(args: &[OsString]) -> Result<Command, CliError> {
 
     let mut input = Vec::new();
     let mut acoustid_key = None;
+    let mut no_fingerprint_cache = false;
     let mut output = None;
     let mut dry_run = false;
     let mut resume = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
+        if arg == "--no-fingerprint-cache" {
+            if no_fingerprint_cache {
+                return Err(CliError::DuplicateOption("--no-fingerprint-cache"));
+            }
+            no_fingerprint_cache = true;
+            continue;
+        }
         if arg == "--acoustid-key" {
             if acoustid_key.is_some() {
                 return Err(CliError::DuplicateOption("--acoustid-key"));
@@ -182,6 +203,7 @@ fn parse_build(args: &[OsString]) -> Result<Command, CliError> {
 
     Ok(Command::Build(BuildArgs {
         acoustid_key,
+        no_fingerprint_cache,
         input: if input.is_empty() {
             return Err(CliError::MissingOption("--input"));
         } else {
@@ -199,10 +221,18 @@ fn parse_scan(args: &[OsString]) -> Result<Command, CliError> {
     }
     let mut input = Vec::new();
     let mut acoustid_key = None;
+    let mut no_fingerprint_cache = false;
     let mut verbose = false;
     let mut hash = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
+        if arg == "--no-fingerprint-cache" {
+            if no_fingerprint_cache {
+                return Err(CliError::DuplicateOption("--no-fingerprint-cache"));
+            }
+            no_fingerprint_cache = true;
+            continue;
+        }
         if arg == "--acoustid-key" {
             if acoustid_key.is_some() {
                 return Err(CliError::DuplicateOption("--acoustid-key"));
@@ -237,6 +267,7 @@ fn parse_scan(args: &[OsString]) -> Result<Command, CliError> {
     }
     Ok(Command::Scan(ScanArgs {
         acoustid_key,
+        no_fingerprint_cache,
         input: if input.is_empty() {
             return Err(CliError::MissingOption("--input"));
         } else {
@@ -265,6 +296,7 @@ mod tests {
                 parse(args),
                 Ok(Command::Build(BuildArgs {
                     acoustid_key: None,
+                    no_fingerprint_cache: false,
                     input: vec![PathBuf::from("music collection")],
                     output: PathBuf::from("../clean"),
                     dry_run: false,
@@ -290,6 +322,7 @@ mod tests {
             parse(args),
             Ok(Command::Build(BuildArgs {
                 acoustid_key: None,
+                no_fingerprint_cache: false,
                 input: vec![PathBuf::from(path)],
                 output: PathBuf::from("clean"),
                 dry_run: false,

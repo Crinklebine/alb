@@ -299,7 +299,7 @@ fn malformed_and_missing_metadata_get_sidecars_while_good_files_build() {
     );
     for (class, original) in [
         ("Missing Metadata", "missing.wav"),
-        ("Metadata Errors", "broken.m4a"),
+        ("Damaged Files", "broken.m4a"),
     ] {
         let files: Vec<_> = fs::read_dir(f.0.join("out/Problem Files").join(class))
             .unwrap()
@@ -422,7 +422,7 @@ fn archived_times_survive_normal_and_problem_copies() {
             .unwrap(),
         original.modified().unwrap()
     );
-    let problems: Vec<_> = fs::read_dir(f.0.join("out/Problem Files/Metadata Errors"))
+    let problems: Vec<_> = fs::read_dir(f.0.join("out/Problem Files/Damaged Files"))
         .unwrap()
         .map(|p| p.unwrap().path())
         .collect();

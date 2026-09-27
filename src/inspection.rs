@@ -21,14 +21,24 @@ pub enum InspectionError {
     Parse(lofty::error::FileParseError),
     NotRegularFile,
     SourceChanged,
+    Media(String),
 }
 
 impl fmt::Display for InspectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "cannot read source: {error}"),
-            Self::Parse(error) => write!(f, "metadata parse failed: {error}"),
+            Self::Parse(error) => {
+                write!(f, "metadata parse failed: {error}")?;
+                let mut cause = std::error::Error::source(error);
+                while let Some(error) = cause {
+                    write!(f, ": {error}")?;
+                    cause = error.source();
+                }
+                Ok(())
+            }
             Self::NotRegularFile => write!(f, "source is no longer a regular file"),
+            Self::Media(error) => write!(f, "media integrity error: {error}"),
             Self::SourceChanged => write!(f, "source changed during metadata inspection"),
         }
     }
@@ -39,7 +49,7 @@ impl std::error::Error for InspectionError {
         match self {
             Self::Io(error) => Some(error),
             Self::Parse(error) => Some(error),
-            Self::NotRegularFile | Self::SourceChanged => None,
+            Self::NotRegularFile | Self::SourceChanged | Self::Media(_) => None,
         }
     }
 }
@@ -47,30 +57,27 @@ impl std::error::Error for InspectionError {
 /// Preserve every discovered file; read basic tags for all five supported types.
 #[cfg(test)]
 pub fn inspect(files: &[PathBuf]) -> TrackCatalog {
-    inspect_with_key(files, None)
+    inspect_with_key(files, None, true)
 }
 
-pub fn inspect_with_key(files: &[PathBuf], key: Option<crate::acoustid::ApiKey>) -> TrackCatalog {
-    let mut lookup = key.map(crate::acoustid::AcoustId::new);
+pub fn inspect_with_key(
+    files: &[PathBuf],
+    key: Option<crate::acoustid::ApiKey>,
+    no_cache: bool,
+) -> TrackCatalog {
+    let mut lookup = if key.is_none() && no_cache {
+        None
+    } else {
+        Some(crate::acoustid::AcoustId::configured(key, no_cache))
+    };
     let mut catalog = TrackCatalog::default();
     let progress = crate::progress::Progress::new("Reading metadata", Some(files.len()));
     for (index, path) in files.iter().enumerate() {
         progress.set(index);
-        if classify(path) == FileType::Unknown {
-            let mut track = Track::empty(path);
-            match SourceStamp::at(path) {
-                Ok(stamp) => track.source_stamp = Some(stamp),
-                Err(error) => catalog
-                    .errors
-                    .push((path.clone(), InspectionError::Io(error).to_string())),
-            }
-            catalog.tracks.push(track);
-            continue;
-        }
         let (mut track, safe_to_lookup) = match inspect_known(path) {
             Ok(track) => (track, true),
             Err(error) => {
-                let safe = matches!(error, InspectionError::Parse(_));
+                let mut safe = matches!(error, InspectionError::Parse(_));
                 catalog.errors.push((path.clone(), error.to_string()));
                 let mut track = if safe {
                     inspect_known_mode(path, ParsingMode::BestAttempt)
@@ -80,7 +87,13 @@ pub fn inspect_with_key(files: &[PathBuf], key: Option<crate::acoustid::ApiKey>)
                             }
                             error => Err(error),
                         })
-                        .unwrap_or_else(|_| Track::empty(path))
+                        .unwrap_or_else(|error| {
+                            if !matches!(error, InspectionError::Parse(_)) {
+                                safe = false;
+                                catalog.errors.push((path.clone(), error.to_string()));
+                            }
+                            Track::empty(path)
+                        })
                 } else {
                     Track::empty(path)
                 };
@@ -105,12 +118,16 @@ pub fn inspect_with_key(files: &[PathBuf], key: Option<crate::acoustid::ApiKey>)
                 track = Track::empty(path);
             }
         }
+        crate::tagging::prepare(&mut track);
         catalog.tracks.push(track);
     }
     progress.set(files.len());
     drop(progress);
     if let Some(warning) = lookup.as_mut().and_then(|l| l.take_warning()) {
         eprintln!("{warning}");
+    }
+    if let Some(lookup) = &lookup {
+        eprintln!("{}", lookup.summary());
     }
     catalog
 }
@@ -125,6 +142,7 @@ fn recover_missing(track: &mut Track, lookup: Option<&mut dyn crate::acoustid::L
         track.metadata_update = Some(crate::tagging::MetadataUpdate {
             artist: missing(&track.artist).then(|| found.artist.clone()),
             title: missing(&track.title).then(|| found.title.clone()),
+            ..Default::default()
         });
         if missing(&track.artist) {
             track.artist = Some(found.artist);
@@ -153,7 +171,20 @@ fn inspect_known_mode(path: &Path, mode: ParsingMode) -> Result<Track, Inspectio
     if opened != expected {
         return Err(InspectionError::SourceChanged);
     }
-    let mut track = read_metadata_mode(path, &mut file, mode)?;
+    let kind = crate::media::identify(&mut file, classify(path))
+        .map_err(|e| InspectionError::Media(e.to_string()))?;
+    if kind != FileType::Unknown {
+        crate::media::structure(&mut file, kind)
+            .map_err(|e| InspectionError::Media(e.to_string()))?;
+    }
+    let mut track = read_metadata_as(path, &mut file, mode, kind)?;
+    if kind != classify(path) {
+        track.metadata_notes.push(if kind == FileType::Unknown {
+            format!("Format corrected: extension suggested {}; unsupported media preserved under UNKNOWN with its original extension", classify(path).group())
+        } else {
+            format!("Format corrected: extension suggested {}; detected {}; output uses .{}", classify(path).group(), kind.group(), kind.extension())
+        });
+    }
     let after = SourceStamp::from_file(&file).map_err(InspectionError::Io)?;
     if after != expected || SourceStamp::at(path).map_err(InspectionError::Io)? != expected {
         return Err(InspectionError::SourceChanged);
@@ -169,33 +200,73 @@ fn read_metadata(
 ) -> Result<Track, InspectionError> {
     read_metadata_mode(path, reader, ParsingMode::Strict)
 }
+#[cfg(test)]
 fn read_metadata_mode(
     path: &Path,
     reader: &mut (impl io::Read + io::Seek),
     mode: ParsingMode,
 ) -> Result<Track, InspectionError> {
+    read_metadata_as(path, reader, mode, classify(path))
+}
+fn read_metadata_as(
+    path: &Path,
+    reader: &mut (impl io::Read + io::Seek),
+    mode: ParsingMode,
+    kind: FileType,
+) -> Result<Track, InspectionError> {
     let options = ParseOptions::new().read_cover_art(false).parsing_mode(mode);
-    let isolated = if classify(path) == FileType::Mp3 {
+    let isolated = if matches!(kind, FileType::Mp3 | FileType::Wav) {
         mp3_blocks(reader)?
     } else {
         Vec::new()
     };
-    let probe = match classify(path) {
-        FileType::Flac => Probe::with_file_type(reader, ReaderType::Flac),
-        FileType::M4a => Probe::with_file_type(reader, ReaderType::Mp4),
-        FileType::Mp3 => Probe::with_file_type(reader, ReaderType::Mpeg),
-        FileType::Wav => Probe::with_file_type(reader, ReaderType::Wav),
-        // Let the metadata library select its Ogg tag reader. This never changes
-        // ALB's extension-defined file type or asks for decoded audio.
-        FileType::Ogg => Probe::new(reader)
-            .guess_file_type()
-            .map_err(InspectionError::Io)?,
-        FileType::Unknown => return Ok(Track::empty(path)),
+    let mut legacy_tags = Vec::new();
+    let file = if kind == FileType::Wav {
+        let layout = crate::media::wav_layout(reader).map_err(InspectionError::Io)?;
+        if layout.legacy_tag {
+            reader
+                .seek(io::SeekFrom::Start(layout.end))
+                .map_err(InspectionError::Io)?;
+            // Leave room for the MPEG reader to probe optional footer formats.
+            let mut bytes = [0; 384];
+            reader
+                .read_exact(&mut bytes[256..])
+                .map_err(InspectionError::Io)?;
+            if let Ok(legacy) = Probe::with_file_type(io::Cursor::new(bytes), ReaderType::Mpeg)
+                .options(ParseOptions::new().read_properties(false))
+                .read()
+            {
+                legacy_tags.extend(legacy.tags().iter().cloned());
+            }
+        }
+        let window = crate::media::Window::new(reader, layout.start, layout.end)
+            .map_err(InspectionError::Io)?;
+        Probe::with_file_type(window, ReaderType::Wav)
+            .options(options)
+            .read()
+            .map_err(InspectionError::Parse)?
+    } else {
+        let probe = match kind {
+            FileType::Flac => Probe::with_file_type(reader, ReaderType::Flac),
+            FileType::M4a => Probe::with_file_type(reader, ReaderType::Mp4),
+            FileType::Mp3 => Probe::with_file_type(reader, ReaderType::Mpeg),
+            FileType::Wav => Probe::with_file_type(reader, ReaderType::Wav),
+            // Let the metadata library select its Ogg tag reader. This never changes
+            // ALB's extension-defined file type or asks for decoded audio.
+            FileType::Ogg => Probe::new(reader)
+                .guess_file_type()
+                .map_err(InspectionError::Io)?,
+            FileType::Unknown => {
+                let mut track = Track::empty(path);
+                track.file_type = FileType::Unknown;
+                return Ok(track);
+            }
+        };
+        probe
+            .options(options)
+            .read()
+            .map_err(InspectionError::Parse)?
     };
-    let file = probe
-        .options(options)
-        .read()
-        .map_err(InspectionError::Parse)?;
     let tags: Vec<_> = isolated
         .iter()
         .chain(
@@ -205,8 +276,16 @@ fn read_metadata_mode(
                     .filter(|tag| tag.tag_type() != file.primary_tag_type()),
             ),
         )
+        .chain(legacy_tags.iter())
         .collect();
     let mut track = Track::empty(path);
+    track.file_type = kind;
+    if kind == FileType::Mp3 && isolated.len() > 1 {
+        track.metadata_notes.push(format!(
+            "Metadata normalization: {} ID3v2 blocks will be consolidated",
+            isolated.len()
+        ));
+    }
     for tag in tags {
         let text = |value: Option<std::borrow::Cow<'_, str>>| {
             value
@@ -258,6 +337,12 @@ fn read_metadata_mode(
 pub(crate) fn mp3_blocks(
     reader: &mut (impl io::Read + io::Seek),
 ) -> Result<Vec<lofty::tag::Tag>, InspectionError> {
+    mp3_blocks_with_cover(reader, false)
+}
+pub(crate) fn mp3_blocks_with_cover(
+    reader: &mut (impl io::Read + io::Seek),
+    cover: bool,
+) -> Result<Vec<lofty::tag::Tag>, InspectionError> {
     use io::{Cursor, Read, SeekFrom};
     let mut tags = Vec::new();
     reader
@@ -292,7 +377,7 @@ pub(crate) fn mp3_blocks(
             .options(
                 ParseOptions::new()
                     .read_properties(false)
-                    .read_cover_art(false)
+                    .read_cover_art(cover)
                     .parsing_mode(ParsingMode::Relaxed),
             )
             .read()
@@ -394,6 +479,7 @@ mod tests {
             &crate::tagging::MetadataUpdate {
                 artist: Some("Recovered Artist".into()),
                 title: Some("Recovered Song".into()),
+                ..Default::default()
             },
             FileType::Mp3,
         )

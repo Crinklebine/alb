@@ -174,16 +174,50 @@ struct Session<B> {
     disabled: bool,
     last_start: Option<Duration>,
     warning_pending: bool,
+    attempts: usize,
+    successes: usize,
+    offline: bool,
+    cache_hits: usize,
+    cache_matches: usize,
+    cache: Option<crate::fingerprint_cache::Cache>,
 }
 pub struct AcoustId {
     session: Session<Live>,
 }
 impl AcoustId {
+    #[cfg(test)]
     pub fn new(key: ApiKey) -> Self {
-        Self {
-            session: Session::with_backend(key, Live::new()),
-        }
+        Self::configured(Some(key), false)
     }
+    pub fn configured(key: Option<ApiKey>, no_cache: bool) -> Self {
+        let offline = key.is_none();
+        let mut session = Session::with_backend(
+            key.unwrap_or_else(|| ApiKey::new(String::new())),
+            Live::new(),
+        );
+        session.offline = offline;
+        if !no_cache {
+            session.cache = crate::fingerprint_cache::directory()
+                .and_then(|root| crate::fingerprint_cache::Cache::new(root).ok());
+        }
+        Self { session }
+    }
+    pub fn summary(&self) -> String {
+        let attempts = self.session.attempts;
+        let successes = self.session.successes;
+        let new_results = if attempts == 0 {
+            "0 attempts".to_owned()
+        } else {
+            let percentage = successes as f64 * 100.0 / attempts as f64;
+            format!("{attempts} attempts, {successes} matched ({percentage:.1}%)")
+        };
+        let cached_matches = self.session.cache_matches;
+        let cached_unmatched = self.session.cache_hits.saturating_sub(cached_matches);
+        format!(
+            "Fingerprinting: new: {new_results}; cached: {cached_matches} matched, {cached_unmatched} unmatched."
+        )
+    }
+
     pub fn take_warning(&mut self) -> Option<&'static str> {
         self.session.take_warning()
     }
@@ -201,6 +235,12 @@ impl<B: Backend> Session<B> {
             disabled: false,
             last_start: None,
             warning_pending: false,
+            attempts: 0,
+            successes: 0,
+            offline: false,
+            cache_hits: 0,
+            cache_matches: 0,
+            cache: None,
         }
     }
     pub fn take_warning(&mut self) -> Option<&'static str> {
@@ -212,7 +252,53 @@ impl<B: Backend> Lookup for Session<B> {
         if self.disabled {
             return None;
         }
-        let fp = self.backend.fingerprint(path)?;
+        let source_stamp = crate::source::SourceStamp::at(path).ok();
+        let cache_key = self
+            .cache
+            .as_ref()
+            .and_then(|_| crate::fingerprint_cache::Cache::key(path));
+        let cached = self
+            .cache
+            .as_ref()
+            .zip(cache_key.as_ref())
+            .and_then(|(cache, key)| cache.read(key));
+        let now = crate::fingerprint_cache::now();
+        if let Some(record) = &cached {
+            let ttl = if record["match"].is_object() {
+                90 * 86400
+            } else {
+                7 * 86400
+            };
+            if record["checked"]
+                .as_u64()
+                .is_some_and(|t| t <= now && now - t < ttl)
+            {
+                let found = cached_identification(&record["match"]);
+                if record["match"].is_null() || found.is_some() {
+                    self.cache_hits += 1;
+                    self.cache_matches += usize::from(found.is_some());
+                    return found;
+                }
+            }
+        }
+        if self.offline {
+            return None;
+        }
+        self.attempts += 1;
+        let fp = cached
+            .as_ref()
+            .and_then(|v| serde_json::to_vec(&v["fp"]).ok())
+            .and_then(|v| parse_fingerprint(&v))
+            .or_else(|| self.backend.fingerprint(path))?;
+        let mut record =
+            serde_json::json!({"fp": {"duration": fp.duration, "fingerprint": fp.fingerprint}});
+        // Keep fingerprint generation even when the network fails; never cache the failure.
+        if let Some((cache, key)) = self.cache.as_ref().zip(cache_key.as_ref())
+            && source_stamp.is_some()
+            && crate::source::SourceStamp::at(path).ok() == source_stamp
+        {
+            let _ = cache.write(key, &record);
+        }
         if let Some(last) = self.last_start {
             let remaining = INTERVAL.saturating_sub(self.backend.now().saturating_sub(last));
             if !remaining.is_zero() {
@@ -234,13 +320,46 @@ impl<B: Backend> Lookup for Session<B> {
         if response.status != 200 {
             return None;
         }
-        let found = select(&json?)?;
-        // Even an unexpected server echo cannot put the supplied key into metadata/reports.
-        if found.artist.contains(&self.key.0) || found.title.contains(&self.key.0) {
+        let json = json?;
+        if json["status"] != "ok" || !json["results"].is_array() {
             return None;
         }
-        Some(found)
+        let found = select(&json);
+        // Never persist a server echo of the credential.
+        if found
+            .as_ref()
+            .is_some_and(|f| f.artist.contains(&self.key.0) || f.title.contains(&self.key.0))
+        {
+            return None;
+        }
+        record["checked"] = now.into();
+        record["match"] = found.as_ref().map_or(
+            Value::Null,
+            |f| serde_json::json!({"artist": f.artist, "title": f.title}),
+        );
+        if let Some((cache, key)) = self.cache.as_ref().zip(cache_key.as_ref())
+            && source_stamp.is_some()
+            && crate::source::SourceStamp::at(path).ok() == source_stamp
+        {
+            let _ = cache.write(key, &record);
+        }
+        self.successes += usize::from(found.is_some());
+        found
     }
+}
+fn cached_identification(value: &Value) -> Option<Identification> {
+    let artist = value["artist"].as_str()?.trim();
+    let title = value["title"].as_str()?.trim();
+    if artist.is_empty()
+        || title.is_empty()
+        || artist.chars().chain(title.chars()).any(char::is_control)
+    {
+        return None;
+    }
+    Some(Identification {
+        artist: artist.into(),
+        title: title.into(),
+    })
 }
 fn select(json: &Value) -> Option<Identification> {
     if json["status"] != "ok" {
@@ -359,6 +478,132 @@ mod tests {
     fn result(score: f64, recordings: Vec<Value>) -> Value {
         json!({"status":"ok","results":[{"score":score,"recordings":recordings}]})
     }
+    #[test]
+    fn persistent_cache_reuses_matches_and_refreshes_expired_results() {
+        let root = std::env::temp_dir().join(format!(
+            "alb-cache-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("song");
+        std::fs::write(&source, b"audio bytes").unwrap();
+        let cache_dir = root.join("cache");
+        let mut first = session(vec![response(
+            200,
+            result(0.99, vec![recording("1", "Artist", "Title")]),
+        )]);
+        first.cache = Some(crate::fingerprint_cache::Cache::new(cache_dir.clone()).unwrap());
+        assert!(first.identify(&source).is_some());
+        let mut second = session(vec![]);
+        second.offline = true;
+        second.cache = Some(crate::fingerprint_cache::Cache::new(cache_dir.clone()).unwrap());
+        assert!(second.identify(&source).is_some());
+        assert_eq!(
+            (
+                second.attempts,
+                second.cache_hits,
+                second.backend.fingerprints
+            ),
+            (0, 1, 0)
+        );
+        let key = crate::fingerprint_cache::Cache::key(&source).unwrap();
+        let cache = second.cache.as_ref().unwrap();
+        let mut record = cache.read(&key).unwrap();
+        record["checked"] = 1.into();
+        cache.write(&key, &record).unwrap();
+        assert!(second.identify(&source).is_none());
+        assert_eq!((second.attempts, second.backend.fingerprints), (0, 0));
+        let mut third = session(vec![response(200, result(0.0, vec![]))]);
+        third.cache = Some(crate::fingerprint_cache::Cache::new(cache_dir.clone()).unwrap());
+        assert!(third.identify(&source).is_none());
+        assert_eq!((third.attempts, third.backend.fingerprints), (1, 0));
+        assert!(third.identify(&source).is_none());
+        assert_eq!(third.cache_hits, 1);
+        std::fs::write(&source, b"changed bytes").unwrap();
+        assert!(third.identify(&source).is_none());
+        assert_eq!(third.backend.fingerprints, 1);
+        // Network failure retained a fingerprint, but not a negative lookup result.
+        assert!(third.identify(&source).is_none());
+        assert_eq!(third.attempts, 3);
+        assert_eq!(third.backend.fingerprints, 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summary_formats_zero_and_fractional_success_rates() {
+        let mut lookup = AcoustId::new(ApiKey::new("local-test-key".into()));
+        assert_eq!(
+            lookup.summary(),
+            "Fingerprinting: new: 0 attempts; cached: 0 matched, 0 unmatched."
+        );
+        lookup.session.attempts = 3;
+        lookup.session.successes = 1;
+        assert_eq!(
+            lookup.summary(),
+            "Fingerprinting: new: 3 attempts, 1 matched (33.3%); cached: 0 matched, 0 unmatched."
+        );
+    }
+
+    #[test]
+    fn summary_distinguishes_cached_matches_from_unmatched_results() {
+        let mut lookup = AcoustId::new(ApiKey::new("local-test-key".into()));
+        for (attempts, matched, cached, cached_matches, expected) in [
+            (
+                0,
+                0,
+                22,
+                0,
+                "Fingerprinting: new: 0 attempts; cached: 0 matched, 22 unmatched.",
+            ),
+            (
+                10,
+                4,
+                879,
+                424,
+                "Fingerprinting: new: 10 attempts, 4 matched (40.0%); cached: 424 matched, 455 unmatched.",
+            ),
+            (
+                2,
+                2,
+                3,
+                3,
+                "Fingerprinting: new: 2 attempts, 2 matched (100.0%); cached: 3 matched, 0 unmatched.",
+            ),
+            (
+                11,
+                0,
+                0,
+                0,
+                "Fingerprinting: new: 11 attempts, 0 matched (0.0%); cached: 0 matched, 0 unmatched.",
+            ),
+        ] {
+            lookup.session.attempts = attempts;
+            lookup.session.successes = matched;
+            lookup.session.cache_hits = cached;
+            lookup.session.cache_matches = cached_matches;
+            assert_eq!(lookup.summary(), expected);
+        }
+    }
+
+    #[test]
+    fn statistics_count_attempts_matches_and_disabled_skips() {
+        let mut s = session(vec![
+            response(200, result(0.99, vec![recording("1", "Artist", "Title")])),
+            None,
+        ]);
+        assert!(s.identify(Path::new("one.mp3")).is_some());
+        assert!(s.identify(Path::new("two.mp3")).is_none());
+        s.backend.fp_ok = false;
+        assert!(s.identify(Path::new("three.mp3")).is_none());
+        s.disabled = true;
+        assert!(s.identify(Path::new("four.mp3")).is_none());
+        assert_eq!((s.attempts, s.successes), (3, 1));
+    }
+
     #[test]
     fn consensus_not_order_selects_dominant_pair_and_rejects_ties() {
         let a = recording("1", "Artist", "Title");

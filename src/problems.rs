@@ -87,6 +87,7 @@ pub fn mark(entry: &mut PlanEntry, input: &Path, output: &Path, class: &str, cau
     for cause in causes {
         entry.notes.push(format!("PROBLEM: {cause}"));
     }
+    entry.metadata_update = None; // Quarantine preserves original bytes, including unresolved tags.
     entry.destination = Some(destination(&entry.source, output, class));
     entry.issues.clear();
     entry.action = Action::Keep;
@@ -95,7 +96,7 @@ pub fn mark(entry: &mut PlanEntry, input: &Path, output: &Path, class: &str, cau
 // Preserve folders below the input root; never reproduce absolute source paths.
 fn preserve_layout(entry: &mut PlanEntry, input: &Path, output: &Path, class: &str) {
     let nested = (|| -> Option<PathBuf> {
-        let relative = entry.source.strip_prefix(input).ok()?;
+        let relative = prior_problem_relative(&entry.source, input)?;
         let mut nested = output.join("Problem Files").join(class);
         for component in relative.parent()?.components() {
             let std::path::Component::Normal(name) = component else {
@@ -118,6 +119,46 @@ fn preserve_layout(entry: &mut PlanEntry, input: &Path, output: &Path, class: &s
         None => entry.notes.push("PROBLEM: Source directory layout could not be retained within safe path limits; original source path is recorded here.".into()),
     }
 }
+// Strip generated wrappers only when the adjacent ALB report authenticates their role.
+fn prior_problem_relative(source: &Path, input: &Path) -> Option<PathBuf> {
+    use std::io::Read;
+    let relative = source.strip_prefix(input).ok()?;
+    let mut report = String::new();
+    let recognized = std::fs::File::open(sidecar_path(source))
+        .ok()
+        .is_some_and(|f| {
+            f.take(65536).read_to_string(&mut report).is_ok()
+                && report.starts_with("ALB problem file\n")
+                && report
+                    .lines()
+                    .any(|l| l == format!("Destination: Some({source:?})"))
+        });
+    if !recognized {
+        return Some(relative.to_owned());
+    }
+    let parts: Vec<_> = relative.components().collect();
+    let mut start = 0;
+    while start + 2 < parts.len()
+        && parts[start].as_os_str() == "Problem Files"
+        && [
+            "Missing Metadata",
+            "Metadata Errors",
+            "Metadata Write Errors",
+            "Damaged Files",
+            "Read Errors",
+            "Copy Errors",
+            "Path Too Long",
+            "Duplicate Problems",
+            "Destination Conflicts",
+        ]
+        .iter()
+        .any(|c| parts[start + 1].as_os_str() == *c)
+    {
+        start += 2;
+    }
+    Some(parts[start..].iter().collect())
+}
+
 pub fn route(plan: &mut BuildPlan, input: &Path, output: &Path) {
     let inputs = plan.input_roots.clone();
     for entry in &mut plan.entries {
@@ -138,10 +179,18 @@ pub fn route(plan: &mut BuildPlan, input: &Path, output: &Path) {
             continue;
         }
         let text = causes.join(" ");
-        let class = if text.contains("hash") || text.contains("source changed") {
+        let class = if text.contains("media integrity error:") {
+            "Damaged Files"
+        } else if text.contains("hash") || text.contains("source changed") {
             "Read Errors"
         } else if text.contains("budget") || text.contains("too long") {
             "Path Too Long"
+        } else if text.contains("missing artist")
+            || text.contains("missing title")
+            || (text.contains("expected 4 digit year field")
+                && text.contains("fallback path preserves source-relative layout"))
+        {
+            "Missing Metadata"
         } else if text.contains("metadata/read error") {
             "Metadata Errors"
         } else if text.contains("missing")
@@ -177,7 +226,7 @@ pub fn route(plan: &mut BuildPlan, input: &Path, output: &Path) {
                     output,
                     "Duplicate Problems",
                     vec![format!(
-                        "Representative {:?} has a file problem; preserve this source independently.",
+                        "Duplicate of {:?}, whose metadata or other file problem remains unresolved; preserved independently to avoid losing a source. See its problem report.",
                         source
                     )],
                 );
@@ -267,7 +316,10 @@ pub fn description(entry: &PlanEntry, outcome: &str) -> String {
         entry
             .notes
             .iter()
-            .filter(|n| n.starts_with("PROBLEM: ") || n.starts_with("AcoustID: "))
+            .filter(|n| n.starts_with("PROBLEM: ")
+                || n.starts_with("AcoustID: ")
+                || n.starts_with("Format corrected:")
+                || n.starts_with("Metadata conflict:"))
             .map(|n| n.strip_prefix("PROBLEM: ").unwrap_or(n))
             .collect::<Vec<_>>()
             .join("\n")

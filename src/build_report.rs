@@ -104,6 +104,18 @@ impl BuildReport {
         )?;
         self.file.sync_all()
     }
+    pub fn metadata_summary(
+        &mut self,
+        resolved: usize,
+        unresolved: usize,
+        repair_failures: usize,
+    ) -> io::Result<()> {
+        writeln!(
+            self.file,
+            "METADATA_SUMMARY resolved={resolved} unresolved={unresolved} repair_failures={repair_failures}"
+        )?;
+        self.file.sync_all()
+    }
     pub fn incomplete(&mut self, failures: usize) -> io::Result<()> {
         writeln!(self.file, "FINISHED_WITH_ERRORS failures={failures}")?;
         self.file.sync_all()
@@ -130,6 +142,17 @@ fn write_times(file: &mut File, entry: &PlanEntry) -> io::Result<()> {
 
 fn write_output(file: &mut File, entry: &PlanEntry) -> io::Result<()> {
     if let Some((hash, bytes)) = entry.output_evidence {
+        if entry
+            .metadata_update
+            .as_ref()
+            .is_some_and(|update| update.normalize)
+        {
+            writeln!(
+                file,
+                "METADATA_GATE PASSED source={:?}; required identity and strict metadata read-back verified",
+                entry.source
+            )?;
+        }
         writeln!(
             file,
             "OUTPUT_EVIDENCE destination={:?} bytes={bytes} blake3={} metadata_update={:?}",
