@@ -15,7 +15,7 @@ and leaves your source files unchanged. It runs on **macOS, Linux, and Windows**
   read-back, preserving encoded audio and artwork.
 - **Handle imperfect collections:** detect mislabeled formats and obvious damage,
   report conflicting tags, and preserve unresolved files in Problem Files.
-- **Preview and resume:** inspect a library, preview a build without writing files,
+- **Preview and resume:** inspect a library, preview a build without writing library files,
   or safely resume an interrupted run.
 - **Preserve archival information:** retain modification times, preserve creation
   times where the platform supports it, and record original timestamps in reports.
@@ -111,6 +111,7 @@ on all three platforms. Existing output files are never overwritten.
 ```text
 alb --help
 alb --version
+alb --clear-cache
 alb scan --input SOURCE [--input SOURCE ...] [--verbose] [--hash] [--acoustid-key KEY]
 alb build --input SOURCE [--input SOURCE ...] --output DESTINATION [--dry-run] [--resume] [--acoustid-key KEY]
 ```
@@ -123,17 +124,20 @@ alb build --input SOURCE [--input SOURCE ...] --output DESTINATION [--dry-run] [
 | `--resume` | `build` | Verify and reuse matching existing outputs. |
 | `--verbose` | `scan` | Print per-file classification, metadata, and errors. |
 | `--hash` | `scan` | Hash files and report same-format exact duplicate groups. |
+| `--no-fingerprint-cache` | `scan`, `build` | Disable fingerprint cache reads and writes. |
+| `--clear-cache` | Top level | Clear the fingerprint cache and exit. |
 | `--acoustid-key KEY` | `scan`, `build` | Optional online Artist/Title lookup for missing fields. |
 | `-h`, `--help` | Top level, `scan`, `build` | Show help for that command. |
 | `-V`, `--version` | Top level | Show the installed version. |
 
 Use separate option values, such as `--input "Music"`, not `--input=Music`.
 Prefix relative paths beginning with `-` with `./`. Only `--input` is repeatable.
-`--dry-run --resume` previews a resumed build without writing anything.
+`--dry-run --resume` previews a resumed build without writing library files or
+reports; optional lookup may update the fingerprint cache.
 
 ### Scan, dry-run, build, and resume
 
-- **Scan:** read-only inventory, classification, and metadata inspection. Add
+- **Scan:** source-preserving inventory, classification, and metadata inspection. Add
   `--verbose` for individual files or `--hash` for exact duplicates.
 - **Dry-run:** reads metadata, hashes files, plans destinations, and checks space.
   Shows summary counts; creates no library files, directories, or reports.
@@ -281,6 +285,10 @@ boundary errors still require review.
 
 ## Optional AcoustID metadata fallback
 
+Recovery fills missing Artist/Title identification; it does not fact-check,
+continuously retag, or canonicalize an already usable library. Accepted matches
+are identification evidence, not a guarantee that the tags are factually correct.
+
 ### Persistent fingerprint cache
 
 Fingerprint lookup automatically saves fingerprints and accepted lookup results in
@@ -323,7 +331,9 @@ ALB performs fresh lookups without using or updating the cache:
 alb build --input Audio --output Audio-Lib --no-fingerprint-cache
 alb scan --input Audio --no-fingerprint-cache
 ```
-Scan and dry-run may update this cache, but never modify source files.
+Scan and dry-run may update this cache without modifying source audio. Keep the
+ALB configuration/cache directory outside your input trees: ALB does not check
+that location against input roots. Use `--no-fingerprint-cache` when necessary.
 
 Clear the fingerprint cache without touching settings or music (all platforms):
 
@@ -476,8 +486,9 @@ The sorter, catalog, planner, copy verifier, reports and recovery logic are shar
 
 Windows retains an empty `.alb-build.lock` in output; it is not a stale lock after
 the process exits. Windows junctions, mount reparse points and cloud-placeholder
-reparse files are skipped/refused rather than followed. macOS/Linux refuse subtree
-mount crossings during execution.
+reparse files are skipped/refused rather than followed. Linux refuses subtree mount crossings during execution; macOS rejects
+cross-device traversal. These checks are not protection against arbitrary mount
+changes.
 
 New copies must retain exact source timestamp precision or report a problem.
 Dates in audits and problem explanations use
@@ -511,8 +522,10 @@ retained for one day; they are not distribution releases. Install from crates.io
 for normal use. Build locally for other CPU architectures.
 Synthetic audio fixtures require no encoder during tests.
 
-See [PROJECT.md](PROJECT.md), [STATUS.md](STATUS.md),
-[DECISIONS.md](DECISIONS.md), and [NEXT.md](NEXT.md) for project context.
+Maintainer documentation: [PROJECT.md](PROJECT.md) defines scope and contributor
+workflow; [DECISIONS.md](DECISIONS.md) explains architectural rationale;
+[STATUS.md](STATUS.md) records validation status; [NEXT.md](NEXT.md) lists near-term
+validation work. This README is the primary user reference.
 
 ## Planned features
 
@@ -520,8 +533,7 @@ A separate, opt-in AcoustID contribution workflow is under consideration. There
 is currently **no `alb share` command**. Builds and lookups do not submit tags or
 fingerprints as database contributions. Lookup requests only query AcoustID.
 
-Broader container repair and decoder-level audio validation are possible future
-work. The current metadata gate and damage checks are defined above.
+The current metadata gate and damage checks are defined above.
 
 ## License
 

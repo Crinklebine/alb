@@ -1,12 +1,12 @@
-# Next steps
+# Near-term validation work
 
-Cross-platform version: 0.2.0.
+This is a validation checklist, not a feature roadmap. Current behavior and
+limitations are documented in [README.md](README.md).
 
-1. Complete native CI on Linux, macOS and Windows; resolve any platform-specific
-   failures before treating the release as ready.
-2. Use small user-owned samples on APFS and NTFS before full-library trials.
-3. Broaden filesystem/network-volume qualification and evaluate large-library
-   performance. Do not add audio analysis or weaken source safety.
-
-Portable workflow: dry-run summary, build, inspect Problem Files explanations and
-_ALB audit, then resume dry-run. Preserve _ALB as archival metadata.
+1. For changes affecting filesystem operations, run the manual native CI matrix
+   and record results for the tested revision on Linux, macOS, and Windows.
+2. Broaden filesystem and network-volume qualification with small disposable
+   samples, recording timestamp precision, no-overwrite behavior, interrupted
+   builds, and verified resume before attempting full-library trials.
+3. Measure large-library inspection, fingerprint-cache reuse, and copy performance
+   before choosing optimizations; retain source safety and verification checks.
