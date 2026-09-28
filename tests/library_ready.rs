@@ -607,7 +607,8 @@ fn long_generated_names_shorten_without_losing_tags_and_collisions_stay_distinct
 
 #[test]
 fn prior_problem_wrappers_are_removed_only_with_matching_alb_report() {
-    for recognized in [false, true] {
+    for report_style in [0, 1, 2] {
+        let recognized = report_style != 0;
         let f = Fixture::new();
         let rel = "Problem Files/Missing Metadata/Problem Files/Metadata Errors/Band/song.mp3";
         let source = f.0.join("in").join(rel);
@@ -616,7 +617,11 @@ fn prior_problem_wrappers_are_removed_only_with_matching_alb_report() {
         if recognized {
             fs::write(
                 source.with_extension("mp3.txt"),
-                format!("ALB problem file\nDestination: Some({source:?})\n"),
+                if report_style == 1 {
+                    format!("ALB problem file\nDestination: Some({source:?})\n")
+                } else {
+                    format!("ALB problem file\n\nFILE LOCATIONS\n==============\nDestination: {source:?}\n")
+                },
             )
             .unwrap();
         }
@@ -691,6 +696,38 @@ fn non_audio_riff_and_utf16_files_are_preserved_without_problem_reports() {
         assert_eq!(
             fs::read(f.0.join("in").join(name)).unwrap(),
             fs::read(f.0.join("out/UNKNOWN").join(name)).unwrap()
+        );
+    }
+}
+
+#[test]
+fn missing_metadata_reports_name_every_missing_required_field() {
+    for (artist, title) in [(false, false), (true, false), (false, true)] {
+        let f = Fixture::new();
+        let mut fields = Vec::new();
+        if artist {
+            fields.push((b"TPE1", "Artist"));
+        }
+        if title {
+            fields.push((b"TIT2", "Title"));
+        }
+        let mut bytes = block(&fields);
+        bytes.extend_from_slice(include_bytes!("fixtures/untagged.mp3"));
+        fs::write(f.0.join("in/song.mp3"), &bytes).unwrap();
+        f.run(false);
+        let report =
+            fs::read_to_string(f.0.join("out/Problem Files/Missing Metadata/song.mp3.txt"))
+                .unwrap();
+        assert!(report.contains("Reason: Required metadata"), "{report}");
+        assert_eq!(
+            report.contains("Missing required metadata: artist"),
+            !artist,
+            "{report}"
+        );
+        assert_eq!(
+            report.contains("Missing required metadata: title"),
+            !title,
+            "{report}"
         );
     }
 }

@@ -22,7 +22,7 @@ and leaves your source files unchanged. It runs on **macOS, Linux, and Windows**
 - **Show useful progress:** display operation counts, check destination free space,
   and keep detailed per-file results in `_ALB` reports.
 
-This README describes **ALB 0.4.12**.
+This README describes **ALB 0.4.13**.
 
 ## Install
 
@@ -394,6 +394,9 @@ may expose the argument; keep your key private.
 
 File-level errors do not stop unrelated work. Classes include missing metadata,
 metadata parsing/writing, damaged files, long paths, read errors, destination conflicts and copy errors.
+Problem reports put the reason and missing fields first, followed by clearly labelled
+processing results, file locations, additional details, original timestamps, and next steps.
+
 Each handled problem copy has an adjacent text explanation with the source path,
 original destination, detailed causes and outcome.
 
@@ -572,3 +575,7 @@ or ID3 signature, MPEG detection requires two complete, consistent frames. This
 avoids mistaking UTF-16 text for MP3. Extremely short or free-format untagged audio
 with an unknown extension may remain `UNKNOWN`; known audio extensions retain their
 existing validation path.
+
+Problem sidecars include a plain-language reason for their category and specific
+missing Artist/Title fields, including when both fields are unavailable. Folder
+preservation notes are additional context, not the reason for quarantine.

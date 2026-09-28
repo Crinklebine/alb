@@ -84,6 +84,28 @@ pub fn mark(entry: &mut PlanEntry, input: &Path, output: &Path, class: &str, cau
             entry.destination
         ));
     }
+    let reason = match class {
+        "Missing Metadata" => {
+            "Required metadata is missing, unreadable, or invalid; ALB cannot safely organize this file. See the specific fields below."
+        }
+        "Metadata Errors" => {
+            "Audio metadata could not be read reliably. See the parser error below."
+        }
+        "Metadata Write Errors" => {
+            "Output metadata could not be repaired and validated; the original bytes were preserved."
+        }
+        "Damaged Files" => "Audio integrity checks failed. See the detected damage below.",
+        "Read Errors" => "The source could not be read reliably or changed during processing.",
+        "Copy Errors" => "The planned copy or verification failed. See the operation error below.",
+        "Path Too Long" => "The proposed output path exceeds ALB's safe naming limits.",
+        "Duplicate Problems" => {
+            "The duplicate's representative has an unresolved problem, so this file was preserved independently."
+        }
+        _ => {
+            "The destination could not be used safely. See the conflict or filesystem error below."
+        }
+    };
+    entry.notes.push(format!("PROBLEM: Reason: {reason}"));
     for cause in causes {
         entry.notes.push(format!("PROBLEM: {cause}"));
     }
@@ -129,9 +151,10 @@ fn prior_problem_relative(source: &Path, input: &Path) -> Option<PathBuf> {
         .is_some_and(|f| {
             f.take(65536).read_to_string(&mut report).is_ok()
                 && report.starts_with("ALB problem file\n")
-                && report
-                    .lines()
-                    .any(|l| l == format!("Destination: Some({source:?})"))
+                && report.lines().any(|l| {
+                    l == format!("Destination: Some({source:?})")
+                        || l == format!("Destination: {source:?}")
+                })
         });
     if !recognized {
         return Some(relative.to_owned());
@@ -169,7 +192,9 @@ pub fn route(plan: &mut BuildPlan, input: &Path, output: &Path) {
                 .notes
                 .iter()
                 .filter(|n| {
-                    n.starts_with("metadata/read error:")
+                    (n.starts_with("Missing required metadata:")
+                        && !matches!(entry.action, Action::DuplicateOf(_)))
+                        || n.starts_with("metadata/read error:")
                         || (n.starts_with("fallback path")
                             && entry.file_type != crate::candidates::FileType::Unknown)
                 })
@@ -303,27 +328,62 @@ pub fn route(plan: &mut BuildPlan, input: &Path, output: &Path) {
 }
 
 pub fn description(entry: &PlanEntry, outcome: &str) -> String {
-    let timestamps = format!(
-        "Original modified time (UTC): {}\nOriginal creation time (UTC): {}\n{}\n",
-        crate::source::timestamp(entry.source_stamp.as_ref().map(|s| s.modified)),
-        crate::source::timestamp(entry.source_stamp.as_ref().and_then(|s| s.created)),
-        crate::platform::CREATION_POLICY
-    );
-    format!(
-        "ALB problem file\nSource: {:?}\nDestination: {:?}\nOutcome: {outcome}\n{timestamps}\n{}\n\nThe source was not modified. Review its metadata or the reported filesystem error.\n",
-        entry.source,
-        entry.destination,
-        entry
-            .notes
+    let mut explanation = Vec::new();
+    let mut details = Vec::new();
+    let mut original_destination = Vec::new();
+    for note in &entry.notes {
+        if let Some(problem) = note.strip_prefix("PROBLEM: ") {
+            if problem.starts_with("Reason:") || problem.starts_with("Missing required metadata:") {
+                explanation.push(problem.to_owned());
+            } else if problem.starts_with("Original proposed destination:") {
+                original_destination.push(problem.to_owned());
+            } else {
+                details.push(problem.to_owned());
+            }
+        } else if note.starts_with("AcoustID: ")
+            || note.starts_with("Format corrected:")
+            || note.starts_with("Metadata conflict:")
+        {
+            details.push(note.clone());
+        }
+    }
+    if explanation.is_empty() {
+        explanation
+            .push("Reason: This file could not be processed safely. See the details below.".into());
+    }
+    let bullets = |lines: &[String]| {
+        lines
             .iter()
-            .filter(|n| n.starts_with("PROBLEM: ")
-                || n.starts_with("AcoustID: ")
-                || n.starts_with("Format corrected:")
-                || n.starts_with("Metadata conflict:"))
-            .map(|n| n.strip_prefix("PROBLEM: ").unwrap_or(n))
+            .map(|line| format!("- {line}"))
             .collect::<Vec<_>>()
             .join("\n")
-    )
+    };
+    let destination = entry
+        .destination
+        .as_ref()
+        .map(|p| format!("{p:?}"))
+        .unwrap_or_else(|| "Not assigned".into());
+    let mut report = format!(
+        "ALB problem file\n\nWHY THIS FILE NEEDS ATTENTION\n=============================\n{}\n\nPROCESSING RESULT\n=================\nOutcome: {outcome}\nThe source was not modified.\n\nFILE LOCATIONS\n==============\nSource: {:?}\nDestination: {destination}\n",
+        bullets(&explanation),
+        entry.source,
+    );
+    for original in original_destination {
+        report.push_str(&format!("{original}\n"));
+    }
+    if !details.is_empty() {
+        report.push_str(&format!(
+            "\nADDITIONAL DETAILS\n==================\n{}\n",
+            bullets(&details)
+        ));
+    }
+    report.push_str(&format!(
+        "\nORIGINAL FILE TIMES\n===================\nOriginal modified time (UTC): {}\nOriginal creation time (UTC): {}\n{}\n\nWHAT TO DO NEXT\n===============\nReview the explanation and any details above. Correct missing or invalid tags,\nreplace damaged audio with a good original, or resolve the reported filesystem\nproblem as appropriate, then run ALB again. Keep this report with its file.\n",
+        crate::source::timestamp(entry.source_stamp.as_ref().map(|s| s.modified)),
+        crate::source::timestamp(entry.source_stamp.as_ref().and_then(|s| s.created)),
+        crate::platform::CREATION_POLICY,
+    ));
+    report
 }
 
 #[cfg(test)]

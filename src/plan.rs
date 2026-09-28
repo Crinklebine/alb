@@ -272,6 +272,18 @@ pub fn generate_many(
         }
         if let Some(track) = tracks.get(&source)
             && track.file_type != FileType::Unknown
+        {
+            for (field, value) in [
+                ("artist", track.artist.as_deref()),
+                ("title", track.title.as_deref()),
+            ] {
+                if required(value, field).is_err() {
+                    entry.notes.push(format!("Missing required metadata: {field} (absent, blank, or unreadable after metadata recovery)."));
+                }
+            }
+        }
+        if let Some(track) = tracks.get(&source)
+            && track.file_type != FileType::Unknown
             && (track.artist.is_some() || track.album.is_some() || track.title.is_some())
         {
             let proposed = if let Some(root) = &entry.fingerprint_root {
@@ -310,7 +322,11 @@ pub fn generate_many(
                     }
                     keys.entry(key).or_default().push(plan.entries.len());
                 }
-                Err(error) => entry.issues.push(error),
+                Err(error) => {
+                    if !entry.issues.contains(&error) {
+                        entry.issues.push(error);
+                    }
+                }
             }
         }
         if let Some(error) = failures.get(&source) {
@@ -336,7 +352,11 @@ pub fn generate_many(
                         .push("fallback path preserves source-relative layout".into());
                     keys.entry(key).or_default().push(plan.entries.len());
                 }
-                Err(error) => entry.issues.push(error),
+                Err(error) => {
+                    if !entry.issues.contains(&error) {
+                        entry.issues.push(error);
+                    }
+                }
             }
         }
         plan.entries.push(entry);
@@ -439,7 +459,11 @@ fn attach_hashes(plan: &mut BuildPlan, hashes: &HashCatalog, inputs: &[PathBuf])
                         name,
                     ) {
                         Ok(path) => entry.destination = Some(path),
-                        Err(error) => entry.issues.push(error),
+                        Err(error) => {
+                            if !entry.issues.contains(&error) {
+                                entry.issues.push(error);
+                            }
+                        }
                     }
                 }
                 entry.fingerprint_root = Some(root);
