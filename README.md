@@ -112,8 +112,10 @@ on all three platforms. Existing output files are never overwritten.
 alb --help
 alb --version
 alb --clear-cache
-alb scan --input SOURCE [--input SOURCE ...] [--verbose] [--hash] [--acoustid-key KEY]
-alb build --input SOURCE [--input SOURCE ...] --output DESTINATION [--dry-run] [--resume] [--acoustid-key KEY]
+alb scan --input SOURCE [--input SOURCE ...] [--verbose] [--hash]
+         [--acoustid-key KEY] [--no-fingerprint-cache]
+alb build --input SOURCE [--input SOURCE ...] --output DESTINATION
+          [--dry-run] [--resume] [--acoustid-key KEY] [--no-fingerprint-cache]
 ```
 
 | Option | Commands | Meaning |
