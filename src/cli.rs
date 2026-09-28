@@ -16,7 +16,7 @@ Options:
   -V, --version    Print version
   --clear-cache    Clear the persistent fingerprint cache and exit
 
-Build supports Linux, macOS and Windows; use --dry-run to preview without writes.
+Build supports Linux, macOS and Windows; use --dry-run to preview without writing library files.
 Use 'alb build --help' or 'alb scan --help' for command options.
 Source libraries must always remain immutable.";
 

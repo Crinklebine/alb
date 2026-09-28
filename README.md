@@ -537,13 +537,7 @@ fingerprints as database contributions. Lookup requests only query AcoustID.
 
 The current metadata gate and damage checks are defined above.
 
-## License
-
-ALB is licensed under the GNU General Public License, version 3 or (at your
-option) any later version (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for the
-full license text.
-
-### Metadata outcome summary
+## Metadata outcome summary
 
 Build reports initial inspection warnings separately from final metadata outcomes:
 
@@ -561,7 +555,7 @@ errors, and other non-metadata problems are reported separately through Problem
 Files. These totals are also retained as `METADATA_SUMMARY` in the `_ALB` run report.
 Scan and dry-run cannot report completed repairs because they do not process output.
 
-### Long names, videos, and previously processed problem files
+## Long names, videos, and previously processed problem files
 
 Generated audio filenames are shortened when needed to fit the conservative
 240-byte path budget. Full tags remain unchanged; normal collision handling keeps
@@ -593,3 +587,9 @@ existing validation path.
 Problem sidecars include a plain-language reason for their category and specific
 missing Artist/Title fields, including when both fields are unavailable. Folder
 preservation notes are additional context, not the reason for quarantine.
+
+## License
+
+ALB is licensed under the GNU General Public License, version 3 or (at your
+option) any later version (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for the
+full license text.
