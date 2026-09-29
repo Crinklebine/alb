@@ -731,3 +731,136 @@ fn missing_metadata_reports_name_every_missing_required_field() {
         );
     }
 }
+
+#[test]
+fn reprocessing_archives_alb_reports_and_keeps_unknown_paths_stable() {
+    let f = Fixture::new();
+    let input = f.0.join("in");
+    fs::write(
+        input.join("song.mp3"),
+        include_bytes!("fixtures/untagged.mp3"),
+    )
+    .unwrap();
+    fs::write(input.join("notes.txt"), b"personal notes").unwrap();
+    fs::create_dir(input.join("_ALB")).unwrap();
+    fs::write(input.join("_ALB/build-personal.txt"), b"not an ALB report").unwrap();
+    fs::create_dir_all(input.join("Problem Files/Missing Metadata")).unwrap();
+    fs::write(
+        input.join("Problem Files/Missing Metadata/personal.txt"),
+        b"personal explanation",
+    )
+    .unwrap();
+    f.run(false);
+    let first = f.0.join("out");
+    let original_reports: Vec<_> = files(&first)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "txt"))
+        .filter(|p| {
+            let text = fs::read_to_string(p).unwrap();
+            text.starts_with("ALB BUILD REPORT v1\n") || text.starts_with("ALB problem file\n")
+        })
+        .map(|p| fs::read(p).unwrap())
+        .collect();
+    assert_eq!(original_reports.len(), 2);
+
+    // Include pollution produced by older versions, including a detached sidecar.
+    fs::create_dir_all(first.join("UNKNOWN/UNKNOWN")).unwrap();
+    fs::write(first.join("UNKNOWN/UNKNOWN/old.txt"), b"old user notes").unwrap();
+    fs::create_dir_all(first.join("UNKNOWN/Problem Files/Missing Metadata")).unwrap();
+    fs::copy(
+        first.join("Problem Files/Missing Metadata/song.mp3.txt"),
+        first.join("UNKNOWN/Problem Files/Missing Metadata/song.mp3.txt"),
+    )
+    .unwrap();
+
+    let mut source = first;
+    for pass in ["second", "third"] {
+        let output = f.0.join(pass);
+        let before: Vec<_> = files(&source)
+            .into_iter()
+            .map(|p| (p.clone(), fs::read(&p).unwrap()))
+            .collect();
+        let result = Command::new(env!("CARGO_BIN_EXE_alb"))
+            .args(["build", "--input"])
+            .arg(&source)
+            .arg("--output")
+            .arg(&output)
+            .arg("--no-fingerprint-cache")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        for (path, bytes) in before {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        for (relative, bytes) in [
+            ("notes.txt", b"personal notes".as_slice()),
+            ("old.txt", b"old user notes"),
+            ("_ALB/build-personal.txt", b"not an ALB report"),
+            (
+                "Problem Files/Missing Metadata/personal.txt",
+                b"personal explanation",
+            ),
+        ] {
+            assert_eq!(
+                fs::read(output.join("UNKNOWN").join(relative)).unwrap(),
+                bytes
+            );
+        }
+        assert!(!output.join("UNKNOWN/UNKNOWN").exists());
+        assert!(
+            !output
+                .join("UNKNOWN/Problem Files/Missing Metadata/song.mp3.txt")
+                .exists()
+        );
+        let archive: Vec<_> = files(&output.join("_ALB/Previous Reports"))
+            .into_iter()
+            .map(|p| fs::read(p).unwrap())
+            .collect();
+        for report in &original_reports {
+            assert!(archive.contains(report));
+        }
+        assert!(
+            output
+                .join("Problem Files/Missing Metadata/song.mp3.txt")
+                .exists()
+        );
+        let resumed = Command::new(env!("CARGO_BIN_EXE_alb"))
+            .args(["build", "--input"])
+            .arg(&source)
+            .arg("--output")
+            .arg(&output)
+            .args(["--resume", "--no-fingerprint-cache"])
+            .output()
+            .unwrap();
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(String::from_utf8_lossy(&resumed.stderr).contains("0 verified copies"));
+        source = output;
+    }
+}
+
+#[test]
+fn unverified_alb_folder_names_do_not_change_unknown_routing() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.0.join("in/UNKNOWN")).unwrap();
+    fs::create_dir_all(f.0.join("in/_ALB")).unwrap();
+    fs::write(f.0.join("in/UNKNOWN/notes.txt"), b"user folder").unwrap();
+    fs::write(f.0.join("in/_ALB/build-user.txt"), b"ordinary text").unwrap();
+    f.run(false);
+    assert_eq!(
+        fs::read(f.0.join("out/UNKNOWN/UNKNOWN/notes.txt")).unwrap(),
+        b"user folder"
+    );
+    assert_eq!(
+        fs::read(f.0.join("out/UNKNOWN/_ALB/build-user.txt")).unwrap(),
+        b"ordinary text"
+    );
+    assert!(!f.0.join("out/_ALB/Previous Reports").exists());
+}

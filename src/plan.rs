@@ -232,8 +232,14 @@ pub fn generate_many(
     let mut directories: BTreeMap<String, BTreeMap<Vec<String>, Vec<usize>>> = BTreeMap::new();
     let mut files = discovery.files.clone();
     files.sort();
+    let libraries: std::collections::BTreeSet<_> = inputs
+        .iter()
+        .filter(|root| crate::reprocessing::is_library(root))
+        .cloned()
+        .collect();
     for source in files {
         let input = crate::paths::source_root(&source, inputs).unwrap_or(Path::new(""));
+        let library = libraries.contains(input);
         let mut entry = PlanEntry {
             metadata_update: tracks.get(&source).and_then(|t| t.metadata_update.clone()),
             output_evidence: None,
@@ -343,7 +349,12 @@ pub fn generate_many(
             }
         }
         if entry.destination.is_none() {
-            match fallback(&source, input, output, entry.file_type) {
+            let proposed = if entry.file_type == FileType::Unknown && library {
+                reprocessed_unknown(&source, input, output)
+            } else {
+                fallback(&source, input, output, entry.file_type)
+            };
+            match proposed {
                 Ok((destination, key, changed)) => {
                     entry.destination = Some(destination);
                     entry.sanitized = changed;
@@ -658,7 +669,6 @@ fn fallback(
     output: &Path,
     kind: FileType,
 ) -> Result<(PathBuf, String, bool), String> {
-    use unicode_normalization::UnicodeNormalization;
     let relative = source
         .strip_prefix(input)
         .map_err(|_| "source outside input root")?;
@@ -666,6 +676,28 @@ fn fallback(
     if kind != FileType::Unknown {
         path.push("_Unsorted");
     }
+    relative_destination(relative, output, path)
+}
+
+fn reprocessed_unknown(
+    source: &Path,
+    input: &Path,
+    output: &Path,
+) -> Result<(PathBuf, String, bool), String> {
+    if let Some(relative) = crate::reprocessing::report_relative(source, input, true) {
+        return relative_destination(&relative, output, PathBuf::new());
+    }
+    let relative = crate::reprocessing::unknown_relative(source, input, true)
+        .ok_or("source outside input root")?;
+    relative_destination(relative, output, PathBuf::from("UNKNOWN"))
+}
+
+fn relative_destination(
+    relative: &Path,
+    output: &Path,
+    mut path: PathBuf,
+) -> Result<(PathBuf, String, bool), String> {
+    use unicode_normalization::UnicodeNormalization;
     let mut changed = false;
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {

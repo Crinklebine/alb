@@ -16,6 +16,7 @@ mod platform;
 mod problems;
 mod progress;
 mod report;
+mod reprocessing;
 mod safe_fs;
 mod source;
 mod space;

@@ -72,6 +72,12 @@ Problem routing retains source-relative folders and the original basename where
 safe, shortening or disambiguating only as needed. Sidecars put the explanation
 first and retain source paths, outcome, and original times. A matching ALB sidecar
 is required before removing old Problem Files wrappers during reprocessing.
+An input with a genuine build-report header directly under `_ALB` is treated as
+previous ALB output. Its unknown-file paths lose repeated leading UNKNOWN wrappers;
+recognized old audit reports and problem explanations are copied unchanged under
+`_ALB/Previous Reports`. This retains audit history while new explanations stay
+beside current problem copies. Report recognition combines location and content,
+so ordinary text files are preserved through the unknown-file planner.
 
 Per-file failures do not stop unrelated work. An unreadable or unverifiable source
 is honestly reported as NOT COPIED when reporting is possible. Root isolation,
@@ -129,6 +135,9 @@ Capacity checks query the output filesystem or its nearest existing ancestor,
 include an allowance, and repeat before copying. They neither reserve capacity
 nor fully model quotas, compression, shared blocks, or concurrent disk use.
 Resume comparison copies also require scratch space.
+The current preflight sums tagged-output comparison sizes instead of modeling
+their sequential lifetime. This conservative overestimate can block otherwise
+feasible resumes; correcting it is tracked in NEXT.
 
 ## Dependencies and validation
 

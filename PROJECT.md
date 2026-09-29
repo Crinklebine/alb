@@ -35,7 +35,9 @@ the generic destination planner. Use released registry dependencies and small
 synthetic fixtures rather than personal library files.
 
 Preserve tests for source immutability, root isolation, malformed metadata,
-exact deduplication, output validation, and verified resume. Before handoff run:
+exact deduplication, output validation, and verified resume. Reprocessing coverage
+must preserve ordinary user files and prior reports, keep UNKNOWN paths stable,
+and retain fresh explanations beside current problem copies. Before handoff run:
 
 ```sh
 cargo fmt --check

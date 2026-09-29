@@ -48,6 +48,22 @@ fn sidecar_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+pub fn is_category(category: &str) -> bool {
+    matches!(
+        category,
+        "Missing Metadata"
+            | "Metadata Errors"
+            | "Metadata Write Errors"
+            | "Damaged Files"
+            | "Read Errors"
+            | "Copy Errors"
+            | "Path Too Long"
+            | "Duplicate Problems"
+            | "Destination Conflicts"
+            | "Discovery Errors"
+    )
+}
+
 pub fn collision_destination(path: &Path, source: &Path, attempt: usize) -> PathBuf {
     let id = blake3::hash(source.as_os_str().as_encoded_bytes()).to_hex();
     let extension = path
@@ -163,19 +179,10 @@ fn prior_problem_relative(source: &Path, input: &Path) -> Option<PathBuf> {
     let mut start = 0;
     while start + 2 < parts.len()
         && parts[start].as_os_str() == "Problem Files"
-        && [
-            "Missing Metadata",
-            "Metadata Errors",
-            "Metadata Write Errors",
-            "Damaged Files",
-            "Read Errors",
-            "Copy Errors",
-            "Path Too Long",
-            "Duplicate Problems",
-            "Destination Conflicts",
-        ]
-        .iter()
-        .any(|c| parts[start + 1].as_os_str() == *c)
+        && parts[start + 1]
+            .as_os_str()
+            .to_str()
+            .is_some_and(is_category)
     {
         start += 2;
     }

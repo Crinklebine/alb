@@ -22,7 +22,7 @@ and leaves your source files unchanged. It runs on **macOS, Linux, and Windows**
 - **Show useful progress:** display operation counts, check destination free space,
   and keep detailed per-file results in `_ALB` reports.
 
-This README describes **ALB 0.4.13**.
+This README describes **ALB 0.4.14**.
 
 ## Install
 
@@ -448,10 +448,16 @@ Unchanged copies and source-based exact deduplication retain their existing chec
 ## Space, progress and safety
 
 Capacity estimates include planned new copy bytes, 1% of those bytes, 16 KiB per
-source for metadata/reports and a 16 MiB reserve. Verified resume outputs and
-omitted duplicates do not add copy bytes. Checks run before output creation, again
+source for metadata/reports and a 16 MiB reserve. Resume outputs verified during
+planning and omitted duplicates do not add copy bytes. Checks run before output creation, again
 before execution and before each new copy. This does not reserve capacity or
 guarantee every quota/allocation condition.
+
+Tagged-output resume comparisons are currently counted cumulatively in the
+preflight estimate, although execution creates and removes them one at a time.
+This can reject a resume on a nearly full destination even when enough scratch
+space exists for each comparison. Correcting that estimate is tracked in
+[NEXT.md](NEXT.md).
 
 Free space is queried on the output filesystem, using the nearest existing
 ancestor when the output folder does not yet exist. It is not assumed to be the
@@ -569,7 +575,19 @@ video. ALB does not extract or convert the video's audio.
 When reprocessing an ALB output, a matching adjacent ALB problem report allows
 leading `Problem Files/<category>` wrappers to be collapsed. Remaining source
 folders and filenames are preserved. Folders without a matching report are left
-intact; old reports are preserved as ordinary input files.
+intact. ALB recognizes a previously built library by a build report with its
+expected header directly inside the input's `_ALB` folder. In these libraries,
+old build reports and recognized problem explanations are preserved under
+`_ALB/Previous Reports`; new explanations remain beside the current problem files.
+Archived reports retain their original contents and paths recorded in their text.
+Ordinary text files remain in `UNKNOWN`, and existing leading `UNKNOWN` wrappers
+are collapsed so repeated builds do not keep nesting that folder. This also
+handles extra wrappers and report copies left by earlier ALB versions. Names
+alone do not identify a report: ordinary files in `_ALB` or Problem Files are
+still preserved as unknown files.
+Use the full library root as input for this recognition; a Problem Files subfolder
+alone lacks the required `_ALB` build report. Ordinary non-audio files and
+unrecognized reports inside Problem Files can still be routed to UNKNOWN.
 
 Missing required Artist or Title takes precedence over repairable metadata parsing
 warnings in the problem category; both reasons remain in the explanation. Duplicate
