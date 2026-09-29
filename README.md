@@ -22,7 +22,7 @@ and leaves your source files unchanged. It runs on **macOS, Linux, and Windows**
 - **Show useful progress:** display operation counts, check destination free space,
   and keep detailed per-file results in `_ALB` reports.
 
-This README describes **ALB 0.4.14**.
+This README describes **ALB 0.4.15**.
 
 ## Install
 
@@ -447,23 +447,24 @@ Unchanged copies and source-based exact deduplication retain their existing chec
 
 ## Space, progress and safety
 
-Capacity estimates include planned new copy bytes, 1% of those bytes, 16 KiB per
-source for metadata/reports and a 16 MiB reserve. Resume outputs verified during
-planning and omitted duplicates do not add copy bytes. Checks run before output creation, again
-before execution and before each new copy. This does not reserve capacity or
-guarantee every quota/allocation condition.
-
-Tagged-output resume comparisons are currently counted cumulatively in the
-preflight estimate, although execution creates and removes them one at a time.
-This can reject a resume on a nearly full destination even when enough scratch
-space exists for each comparison. Correcting that estimate is tracked in
-[NEXT.md](NEXT.md).
+Capacity estimates include remaining new copy bytes plus the largest tagged-output
+comparison copy needed for resume. Comparisons run one at a time, and each matching
+comparison partial is removed before the next file. The estimate adds 1% of the
+combined bytes, 16 KiB per source for metadata/reports, and a 16 MiB reserve.
+Resume outputs verified during planning and omitted duplicates do not add copy
+bytes. Problem copies retain their full copy allowance. Destinations removed
+since planning are counted as new copies when the estimate is checked again.
+Checks run before output creation, again before execution, and before each new
+copy or tagged comparison. This does not reserve capacity or guarantee every
+quota/allocation condition. Mismatched outputs can require additional problem
+copies; per-file space checks still apply.
 
 Free space is queried on the output filesystem, using the nearest existing
 ancestor when the output folder does not yet exist. It is not assumed to be the
 home drive. The displayed planned size is logical file data: filesystems that
 share copied blocks, such as Btrfs, can consume much less physical space. The two
 build summary space checks are both before copying, not before/after readings.
+The summary shows new-copy bytes and comparison scratch space separately.
 
 Terminal status shows an updating operation/count line. Windows enables virtual
 terminal output when available; redirected/unsupported consoles use bounded

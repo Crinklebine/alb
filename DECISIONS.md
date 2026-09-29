@@ -134,10 +134,13 @@ values, never substitute ctime, and retain each duplicate source's own times.
 Capacity checks query the output filesystem or its nearest existing ancestor,
 include an allowance, and repeat before copying. They neither reserve capacity
 nor fully model quotas, compression, shared blocks, or concurrent disk use.
-Resume comparison copies also require scratch space.
-The current preflight sums tagged-output comparison sizes instead of modeling
-their sequential lifetime. This conservative overestimate can block otherwise
-feasible resumes; correcting it is tracked in NEXT.
+Resume comparisons require only peak scratch space because successful comparison
+partials are removed sequentially. Preflight therefore includes remaining new
+copy bytes plus the largest existing tagged-output comparison, with the usual
+allowances. Problem copies remain counted in full, duplicates add no copy bytes,
+and missing destinations are rechecked instead of trusting stale planning notes.
+This avoids requiring room for a second full library on an otherwise valid resume.
+Additional fallback copies after mismatches remain subject to per-file checks.
 
 ## Dependencies and validation
 

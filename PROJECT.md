@@ -37,7 +37,9 @@ synthetic fixtures rather than personal library files.
 Preserve tests for source immutability, root isolation, malformed metadata,
 exact deduplication, output validation, and verified resume. Reprocessing coverage
 must preserve ordinary user files and prior reports, keep UNKNOWN paths stable,
-and retain fresh explanations beside current problem copies. Before handoff run:
+and retain fresh explanations beside current problem copies. Capacity tests must
+cover sequential resume comparisons, mixed new/reused files, and destinations
+removed after planning. Before handoff run:
 
 ```sh
 cargo fmt --check
